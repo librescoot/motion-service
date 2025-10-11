@@ -1,0 +1,20 @@
+[Unit]
+Description=BMX055 Sensor Service
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bmx-service \
+    --i2c-bus=/dev/i2c-3 \
+    --redis=localhost:6379 \
+    --polling-rate=10 \
+    --log-level=info
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
