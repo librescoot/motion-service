@@ -89,9 +89,38 @@ const (
 	MAG_DATAX_LSB      = 0x42
 	MAG_DATAY_LSB      = 0x44
 	MAG_DATAZ_LSB      = 0x46
+	MAG_RHALL_LSB      = 0x48
+	MAG_RHALL_MSB      = 0x49
 	MAG_CHIP_ID_REG    = 0x40
 	MAG_POWER_CTRL     = 0x4B
 	MAG_OPMODE_ODR     = 0x4C
+)
+
+// Magnetometer trim registers (compensation parameters)
+const (
+	MAG_DIG_X1       = 0x5D
+	MAG_DIG_Y1       = 0x5E
+	MAG_DIG_Z4_LSB   = 0x62
+	MAG_DIG_Z4_MSB   = 0x63
+	MAG_DIG_X2       = 0x64
+	MAG_DIG_Y2       = 0x65
+	MAG_DIG_Z2_LSB   = 0x68
+	MAG_DIG_Z2_MSB   = 0x69
+	MAG_DIG_Z1_LSB   = 0x6A
+	MAG_DIG_Z1_MSB   = 0x6B
+	MAG_DIG_XYZ1_LSB = 0x6C
+	MAG_DIG_XYZ1_MSB = 0x6D
+	MAG_DIG_Z3_LSB   = 0x6E
+	MAG_DIG_Z3_MSB   = 0x6F
+	MAG_DIG_XY2      = 0x70
+	MAG_DIG_XY1      = 0x71
+)
+
+// Magnetometer overflow constants
+const (
+	BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL = -4096
+	BMM150_ZAXIS_HALL_OVERFLOW_ADCVAL  = -16384
+	BMM150_OVERFLOW_OUTPUT             = -32768
 )
 
 // I2C/SMBus constants
