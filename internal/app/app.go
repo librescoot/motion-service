@@ -34,6 +34,7 @@ type App struct {
 
 	sensorPoller    *poller.SensorPoller
 	interruptPoller *poller.InterruptPoller
+	magPoller       *poller.MagPoller
 }
 
 // New creates a new App
@@ -80,6 +81,11 @@ func (a *App) Run(ctx context.Context) error {
 		a.accel, a.gyro, a.publisher, a.log)
 	go a.interruptPoller.Run(ctx)
 
+	if a.mag != nil {
+		a.magPoller = poller.NewMagPoller(a.mag, a.publisher, a.log)
+		go a.magPoller.Run(ctx)
+	}
+
 	cmdHandler := redis.NewCommandHandler(a.redis, a.log, a.handleCommand)
 	go cmdHandler.Run(ctx)
 
@@ -114,6 +120,13 @@ func (a *App) initSensors() error {
 	a.gyro, err = bmx.NewGyroscope(a.cfg.I2CBus)
 	if err != nil {
 		return fmt.Errorf("init gyroscope: %w", err)
+	}
+
+	a.log.Info("calibrating gyroscope (keep scooter stationary)")
+	if err := a.gyro.Calibrate(100); err != nil {
+		a.log.Warn("failed to calibrate gyroscope", "error", err)
+	} else {
+		a.log.Info("gyroscope calibration complete")
 	}
 
 	a.log.Info("initializing magnetometer")

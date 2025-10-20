@@ -108,3 +108,33 @@ func (p *Publisher) IncrementErrorCount(ctx context.Context, errorMsg string) er
 
 	return p.UpdateStatusField(ctx, "error-count", fmt.Sprintf("%d", count))
 }
+
+// PublishMagnetometerData publishes magnetometer readings to the bmx:magnetometer channel
+func (p *Publisher) PublishMagnetometerData(ctx context.Context, magData *SensorAxis) error {
+	type MagReading struct {
+		Timestamp int64       `json:"timestamp"`
+		Mag       *SensorAxis `json:"mag"`
+	}
+
+	reading := &MagReading{
+		Timestamp: time.Now().UnixMilli(),
+		Mag:       magData,
+	}
+
+	data, err := json.Marshal(reading)
+	if err != nil {
+		return fmt.Errorf("failed to marshal magnetometer data: %w", err)
+	}
+
+	if err := p.client.Publish(ctx, "bmx:magnetometer", string(data)); err != nil {
+		return fmt.Errorf("failed to publish magnetometer data: %w", err)
+	}
+
+	return nil
+}
+
+// PublishMagnetometerHeading publishes magnetic heading to the bmx hash
+func (p *Publisher) PublishMagnetometerHeading(ctx context.Context, heading float64) error {
+	headingInt := int(heading)
+	return p.UpdateStatusField(ctx, "heading", fmt.Sprintf("%d", headingInt))
+}
