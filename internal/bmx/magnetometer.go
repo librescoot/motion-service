@@ -38,11 +38,24 @@ type Calibration struct {
 }
 
 // DefaultCalibration is the empirical calibration captured on Deep Blue.
-// Other vehicles will need their own values — see docs/calibration.md.
+// Other vehicles will need their own values — run bmx-calibrate, drive a
+// few circles, and use the JSON summary to set HardIronOffset.
+//
+// HardIronOffset captured 2026-04-29 with bmx-calibrate over ~5.6 full
+// rotations on Deep Blue (CW + CCW circles + figure-8s). The Y offset of
+// +320 LSB (~20 µT) is the battery/motor pack's lateral magnetization;
+// the Z offset of +996 LSB (~62 µT) is the steel chassis sheet directly
+// below the sensor — its residual magnetization actually exceeds Earth's
+// vertical field at this distance.
+//
+// AxisSign and YawOffsetDeg need post-deploy verification: spin the
+// scooter clockwise (looking from above) and confirm heading increases
+// 0→90→180→270 (otherwise flip a sign); park pointing magnetic North and
+// set YawOffsetDeg to whatever offset is needed to read 0.
 var DefaultCalibration = Calibration{
-	HardIronOffset: [3]int16{-441, -259, -1164},
+	HardIronOffset: [3]int16{-9, 320, 996},
 	AxisSign:       [3]float64{-1, 1, -1},
-	YawOffsetDeg:   180.0,
+	YawOffsetDeg:   0,
 }
 
 // Magnetometer represents the BMX055 magnetometer
