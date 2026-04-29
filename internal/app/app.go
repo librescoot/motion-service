@@ -82,7 +82,7 @@ func (a *App) Run(ctx context.Context) error {
 	go a.interruptPoller.Run(ctx)
 
 	if a.mag != nil {
-		a.magPoller = poller.NewMagPoller(a.mag, a.publisher, a.log)
+		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, a.log)
 		go a.magPoller.Run(ctx)
 	}
 

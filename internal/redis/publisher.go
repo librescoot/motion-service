@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 )
 
@@ -133,8 +134,29 @@ func (p *Publisher) PublishMagnetometerData(ctx context.Context, magData *Sensor
 	return nil
 }
 
-// PublishMagnetometerHeading publishes magnetic heading to the bmx hash
-func (p *Publisher) PublishMagnetometerHeading(ctx context.Context, heading float64) error {
-	headingInt := int(heading)
-	return p.UpdateStatusField(ctx, "heading", fmt.Sprintf("%d", headingInt))
+// PublishHeading publishes a tilt-compensated heading reading on the
+// bmx:heading PUBSUB channel (JSON) and updates the bmx hash with both the
+// fractional heading and the legacy integer "heading" field, plus the
+// quality fields a consumer needs to gate on.
+func (p *Publisher) PublishHeading(ctx context.Context, reading *HeadingReading) error {
+	data, err := json.Marshal(reading)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heading: %w", err)
+	}
+
+	if err := p.client.Publish(ctx, "bmx:heading", string(data)); err != nil {
+		return fmt.Errorf("failed to publish heading: %w", err)
+	}
+
+	hash := map[string]interface{}{
+		"heading":          fmt.Sprintf("%d", int(math.Mod(reading.HeadingDeg+360.0, 360.0))),
+		"heading-deg":      fmt.Sprintf("%.2f", reading.HeadingDeg),
+		"heading-accuracy": fmt.Sprintf("%.2f", reading.AccuracyDeg),
+		"heading-tilt":     fmt.Sprintf("%.2f", reading.TiltDeg),
+		"heading-tilt-comp": map[bool]string{true: "true", false: "false"}[reading.TiltCompensated],
+	}
+	if err := p.client.HSetMultiple(ctx, "bmx", hash); err != nil {
+		return fmt.Errorf("failed to update heading hash: %w", err)
+	}
+	return nil
 }

@@ -21,10 +21,35 @@ type TrimData struct {
 	digXYZ1 uint16
 }
 
+// Calibration holds runtime-tunable magnetometer calibration.
+//
+// HardIronOffset is subtracted from the raw 16-bit (post-compensation) value
+// before scaling to µT — i.e. the same units the chip reports. Capture by
+// rotating the vehicle 360° in place and taking (max+min)/2 per axis.
+//
+// AxisSign and YawOffsetDeg map sensor-frame µT to vehicle-frame µT used
+// for the heading calculation. AxisSign is ±1 per axis; YawOffsetDeg is
+// added to the final compass heading. These cover the common cases where
+// the BMX055 is mounted upside-down or rotated relative to vehicle forward.
+type Calibration struct {
+	HardIronOffset [3]int16
+	AxisSign       [3]float64
+	YawOffsetDeg   float64
+}
+
+// DefaultCalibration is the empirical calibration captured on Deep Blue.
+// Other vehicles will need their own values — see docs/calibration.md.
+var DefaultCalibration = Calibration{
+	HardIronOffset: [3]int16{-441, -259, -1164},
+	AxisSign:       [3]float64{-1, 1, -1},
+	YawOffsetDeg:   180.0,
+}
+
 // Magnetometer represents the BMX055 magnetometer
 type Magnetometer struct {
 	*i2cDevice
-	trimData TrimData
+	trimData    TrimData
+	calibration Calibration
 }
 
 // NewMagnetometer creates and initializes the magnetometer
@@ -35,7 +60,7 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 	}
 	dev.name = "Magnetometer"
 
-	mag := &Magnetometer{i2cDevice: dev}
+	mag := &Magnetometer{i2cDevice: dev, calibration: DefaultCalibration}
 
 	// Enable power control bit (equivalent to bmm050_init power enable)
 	if err := mag.WriteByteData(MAG_POWER_CTRL, 0x01); err != nil {
@@ -348,68 +373,71 @@ func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
 	return x, y, z, nil
 }
 
-// Hard-iron compensation offsets measured with board installed in scooter
-// with batteries, rotating 360 degrees in one spot
-const (
-	hardIronOffsetX int16 = -441
-	hardIronOffsetY int16 = -259
-	hardIronOffsetZ int16 = -1164
+// SetCalibration replaces the runtime calibration used by ReadDataInMicroTesla
+// and the heading calculations. Safe to call at any time.
+func (m *Magnetometer) SetCalibration(cal Calibration) {
+	m.calibration = cal
+}
 
-	// Heading calibration offset for Deep Blue
-	// BMX055 mounted on underside of board → 180° offset
-	headingCalibrationOffset float64 = 180.0
-)
+// Calibration returns the current runtime calibration.
+func (m *Magnetometer) Calibration() Calibration {
+	return m.calibration
+}
 
-// ReadDataInMicroTesla reads magnetometer data converted to µT with hard-iron compensation
+// raw LSB → µT scale factor (per Bosch BMM150 reference).
+const magScaleUT = 16.0
+
+// ReadDataInMicroTesla reads the magnetometer in vehicle-frame µT with
+// hard-iron and axis-sign calibration applied. The Z axis is included so
+// that consumers can do their own tilt compensation if needed.
 func (m *Magnetometer) ReadDataInMicroTesla() (x, y, z, magnitude float64, err error) {
 	rawX, rawY, rawZ, err := m.ReadData()
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
 
-	// Apply hard-iron compensation
-	compensatedX := rawX - hardIronOffsetX
-	compensatedY := rawY - hardIronOffsetY
-	compensatedZ := rawZ - hardIronOffsetZ
-
-	const scale = 16.0
-	x = float64(compensatedX) / scale
-	y = float64(compensatedY) / scale
-	z = float64(compensatedZ) / scale
+	cal := m.calibration
+	x = m.calibration.AxisSign[0] * float64(rawX-cal.HardIronOffset[0]) / magScaleUT
+	y = m.calibration.AxisSign[1] * float64(rawY-cal.HardIronOffset[1]) / magScaleUT
+	z = m.calibration.AxisSign[2] * float64(rawZ-cal.HardIronOffset[2]) / magScaleUT
 	magnitude = math.Sqrt(x*x + y*y + z*z)
 
 	return x, y, z, magnitude, nil
 }
 
-// ReadHeading reads magnetometer data and calculates compass heading in degrees (0-360)
+// HeadingFromVector computes a compass heading (0-360°, 0=North, 90=East)
+// from a vehicle-frame mag vector with optional roll/pitch tilt compensation.
+//
+// Pass roll/pitch in radians. Pass NaN for either to skip tilt compensation
+// (X/Y-only heading, valid only when the sensor is near horizontal).
+func (m *Magnetometer) HeadingFromVector(magX, magY, magZ, rollRad, pitchRad float64) float64 {
+	var bx, by float64
+	if math.IsNaN(rollRad) || math.IsNaN(pitchRad) {
+		bx = magX
+		by = magY
+	} else {
+		// Project the magnetic vector onto the horizontal plane.
+		// Standard NED-frame tilt compensation; signs follow vehicle frame
+		// (X forward, Y left, Z up) which the AxisSign step produces.
+		sr, cr := math.Sincos(rollRad)
+		sp, cp := math.Sincos(pitchRad)
+		bx = magX*cp + magY*sp*sr + magZ*sp*cr
+		by = magY*cr - magZ*sr
+	}
+
+	angleDeg := math.Atan2(-by, bx) * 180.0 / math.Pi
+	angleDeg += m.calibration.YawOffsetDeg
+	angleDeg = math.Mod(angleDeg+360.0, 360.0)
+	return angleDeg
+}
+
+// ReadHeading reads magnetometer data and returns a non-tilt-compensated
+// compass heading. Retained for callers that don't have an accelerometer
+// available; prefer ComputeTiltCompensatedHeading where possible.
 func (m *Magnetometer) ReadHeading() (heading float64, err error) {
-	rawX, rawY, rawZ, err := m.ReadData()
+	x, y, z, _, err := m.ReadDataInMicroTesla()
 	if err != nil {
 		return 0, err
 	}
-
-	// Apply hard-iron compensation (same as 9axis service)
-	dx := float64(rawX - hardIronOffsetX)
-	dy := float64(rawY - hardIronOffsetY)
-	_ = rawZ - hardIronOffsetZ
-
-	// Sensor is at bottom of board, flip around x-axis
-	dx = dx * -1.0
-
-	// Calculate heading using atan2
-	angleRad := math.Atan2(dy, dx)
-	angleDeg := angleRad * 180.0 / math.Pi
-
-	// Normalize to 0-360 range
-	if angleDeg < 0.0 {
-		angleDeg = 360.0 + angleDeg
-	}
-
-	// Apply Deep Blue calibration offset
-	angleDeg += headingCalibrationOffset
-	if angleDeg >= 360.0 {
-		angleDeg -= 360.0
-	}
-
-	return angleDeg, nil
+	return m.HeadingFromVector(x, y, z, math.NaN(), math.NaN()), nil
 }

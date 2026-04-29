@@ -44,8 +44,33 @@ bmx-service --i2c-bus=/dev/i2c-3 --redis=localhost:6379 --polling-rate=10
 }
 ```
 
+**Magnetic heading** (`bmx:heading` channel, 5Hz):
+```json
+{
+  "timestamp": 1696089234567,
+  "heading_deg": 127.4,
+  "heading_raw_deg": 128.1,
+  "accuracy_deg": 3.8,
+  "tilt_compensated": true,
+  "tilt_deg": 4.2,
+  "mag_strength_ut": 48.6,
+  "excess_g": 0.03,
+  "yaw_rate_dps": 1.7
+}
+```
+`accuracy_deg` is a heuristic that grows with tilt, non-gravity
+acceleration (`excess_g`), and yaw rate. `tilt_compensated` is `false`
+when the accelerometer is moving enough that it can't be trusted as a
+pure gravity vector (hard braking, big bumps); the heading then falls
+back to X/Y-only and accuracy is reported accordingly.
+
 **Interrupt events** (`bmx:interrupt` PUBSUB + `bmx:events` Stream)
-**Status** (`bmx` hash)
+**Status** (`bmx` hash). Heading-related fields:
+- `heading` (int, 0-359, legacy)
+- `heading-deg` (float, 0-360)
+- `heading-accuracy` (float, deg)
+- `heading-tilt` (float, deg)
+- `heading-tilt-comp` (`true`/`false`)
 
 ### Accepted Commands
 

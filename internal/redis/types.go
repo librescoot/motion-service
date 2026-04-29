@@ -39,3 +39,19 @@ type InterruptEvent struct {
 	SensorValues    SensorValues    `json:"sensor_values"`
 	Config          InterruptConfig `json:"config"`
 }
+
+// HeadingReading is the rich magnetic-heading payload published on
+// the bmx:heading channel. Consumers should weight HeadingDeg by
+// AccuracyDeg (or roll their own gating using ExcessG / YawRateDPS /
+// TiltDeg) — this is the data needed to do that, not a verdict.
+type HeadingReading struct {
+	Timestamp       int64   `json:"timestamp"`
+	HeadingDeg      float64 `json:"heading_deg"`       // smoothed compass heading [0,360)
+	HeadingRawDeg   float64 `json:"heading_raw_deg"`   // unsmoothed, this sample only
+	AccuracyDeg     float64 `json:"accuracy_deg"`      // heuristic 1-σ estimate
+	TiltCompensated bool    `json:"tilt_compensated"`  // false → X/Y-only fallback
+	TiltDeg         float64 `json:"tilt_deg"`          // max(|roll|,|pitch|) from accel
+	MagStrengthUT   float64 `json:"mag_strength_ut"`   // |B| in vehicle frame
+	ExcessG         float64 `json:"excess_g"`          // ||a|-1g| — non-gravity accel
+	YawRateDPS      float64 `json:"yaw_rate_dps"`      // |gyro| total turn rate
+}
