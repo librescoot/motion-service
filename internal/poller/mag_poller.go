@@ -161,10 +161,10 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		p.pollCount = 0
 	}
 
-	magData := &redis.SensorAxis{X: magX, Y: magY, Z: magZ, Magnitude: magMag, Unit: "uT"}
-	if err := p.publisher.PublishMagnetometerData(ctx, magData); err != nil {
-		p.log.Error("failed to publish magnetometer data", "error", err)
-	}
+	// Magnetometer values are already in the bmx:sensors payload at 10 Hz —
+	// we don't need a separate bmx:magnetometer channel just for the same
+	// data at half the rate. Suppresses ~750 B/s of redundant pub/sub
+	// traffic over the USB-ethernet link to the DBC.
 
 	reading := &redis.HeadingReading{
 		Timestamp:       time.Now().UnixMilli(),
