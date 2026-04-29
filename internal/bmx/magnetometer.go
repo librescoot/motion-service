@@ -57,19 +57,25 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 		return nil, fmt.Errorf("invalid magnetometer chip ID: 0x%02X (expected 0x32)", chipID)
 	}
 
-	// Set operation mode to Normal (bits 2-1 = 00) and data rate to 30Hz (bits 5-3 = 111)
-	// 0x38 = 0b00111000 = 30Hz Normal mode
-	if err := mag.WriteByteData(MAG_OPMODE_ODR, 0x38); err != nil {
+	// Apply Regular preset (9 XY reps / 15 Z reps) — datasheet ±2.5° heading
+	// accuracy is specified for this preset, not for the power-on default of
+	// 1 rep which is loud enough to be unusable as a compass.
+	if err := mag.WriteByteData(MAG_REPXY, MAG_REPXY_REGULAR); err != nil {
 		mag.Close()
-		return nil, fmt.Errorf("failed to set magnetometer operation mode: %w", err)
+		return nil, fmt.Errorf("failed to set magnetometer REPXY: %w", err)
+	}
+	if err := mag.WriteByteData(MAG_REPZ, MAG_REPZ_REGULAR); err != nil {
+		mag.Close()
+		return nil, fmt.Errorf("failed to set magnetometer REPZ: %w", err)
 	}
 
-	// Verify configuration was written
-	opmode, err := mag.ReadByteData(MAG_OPMODE_ODR)
-	if err != nil {
-		fmt.Printf("Warning: failed to read back OPMODE_ODR: %v\n", err)
-	} else {
-		fmt.Printf("Magnetometer OPMODE_ODR register: 0x%02X\n", opmode)
+	// Normal mode @ 10 Hz ODR. Datasheet pairs the Regular preset with 10 Hz;
+	// running at 30 Hz with only 1 rep (the prior config) gave more samples
+	// of noisier data than is useful.
+	opmodeOdr := byte(MAG_OPMODE_NORMAL | MAG_ODR_10HZ)
+	if err := mag.WriteByteData(MAG_OPMODE_ODR, opmodeOdr); err != nil {
+		mag.Close()
+		return nil, fmt.Errorf("failed to set magnetometer operation mode: %w", err)
 	}
 
 	// Read trim data for temperature compensation
@@ -201,20 +207,19 @@ func (m *Magnetometer) readRhall() (uint16, error) {
 	return rhall, nil
 }
 
-// compensateX applies temperature compensation to X-axis magnetometer data
+// compensateX applies temperature compensation to X-axis magnetometer data.
+// Mirrors the Bosch BMM150 reference compensation flow; intermediates that
+// shift dig_xyz1 left by 14 must be 32-bit — uint16<<14 truncates the value
+// to ~zero and silently breaks compensation.
 func (m *Magnetometer) compensateX(magDataX int16, dataRhall uint16) int16 {
-	// Check for overflow
 	if magDataX == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL {
 		return BMM150_OVERFLOW_OUTPUT
 	}
 
 	var processCompX2 int32
 	if dataRhall != 0 {
-		// Availability of valid data
-		processCompX1 := uint16(m.trimData.digXYZ1) << 14
-		processCompX2 = int32(processCompX1) / int32(dataRhall)
-	} else {
-		processCompX2 = 0
+		processCompX1 := uint32(m.trimData.digXYZ1) << 14
+		processCompX2 = int32(processCompX1 / uint32(dataRhall))
 	}
 
 	retval := int16(processCompX2)
@@ -231,20 +236,17 @@ func (m *Magnetometer) compensateX(magDataX int16, dataRhall uint16) int16 {
 	return retval
 }
 
-// compensateY applies temperature compensation to Y-axis magnetometer data
+// compensateY applies temperature compensation to Y-axis magnetometer data.
+// Same uint16<<14 overflow fix as compensateX.
 func (m *Magnetometer) compensateY(magDataY int16, dataRhall uint16) int16 {
-	// Check for overflow
 	if magDataY == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL {
 		return BMM150_OVERFLOW_OUTPUT
 	}
 
 	var processCompY2 int32
 	if dataRhall != 0 {
-		// Availability of valid data
-		processCompY1 := uint16(m.trimData.digXYZ1) << 14
-		processCompY2 = int32(processCompY1) / int32(dataRhall)
-	} else {
-		processCompY2 = 0
+		processCompY1 := uint32(m.trimData.digXYZ1) << 14
+		processCompY2 = int32(processCompY1 / uint32(dataRhall))
 	}
 
 	retval := int16(processCompY2)

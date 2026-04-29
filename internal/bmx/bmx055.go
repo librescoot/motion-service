@@ -86,14 +86,47 @@ const (
 
 // Magnetometer registers
 const (
-	MAG_DATAX_LSB      = 0x42
-	MAG_DATAY_LSB      = 0x44
-	MAG_DATAZ_LSB      = 0x46
-	MAG_RHALL_LSB      = 0x48
-	MAG_RHALL_MSB      = 0x49
-	MAG_CHIP_ID_REG    = 0x40
-	MAG_POWER_CTRL     = 0x4B
-	MAG_OPMODE_ODR     = 0x4C
+	MAG_DATAX_LSB   = 0x42
+	MAG_DATAY_LSB   = 0x44
+	MAG_DATAZ_LSB   = 0x46
+	MAG_RHALL_LSB   = 0x48
+	MAG_RHALL_MSB   = 0x49
+	MAG_CHIP_ID_REG = 0x40
+	MAG_POWER_CTRL  = 0x4B
+	MAG_OPMODE_ODR  = 0x4C
+	MAG_REPXY       = 0x51
+	MAG_REPZ        = 0x52
+)
+
+// Magnetometer preset values (REPXY, REPZ) per Bosch BMM150 reference.
+// Reps encode as nXY = 1 + 2*REPXY and nZ = 1 + REPZ.
+// Default after power-on is REPXY=REPZ=0x00 (1 rep) — noisiest possible.
+const (
+	MAG_REPXY_LOWPOWER  = 0x01 // 3 reps
+	MAG_REPZ_LOWPOWER   = 0x02 // 3 reps
+	MAG_REPXY_REGULAR   = 0x04 // 9 reps
+	MAG_REPZ_REGULAR    = 0x0E // 15 reps
+	MAG_REPXY_ENHANCED  = 0x07 // 15 reps
+	MAG_REPZ_ENHANCED   = 0x1A // 27 reps
+	MAG_REPXY_HIGHACC   = 0x17 // 47 reps
+	MAG_REPZ_HIGHACC    = 0x52 // 83 reps
+)
+
+// Magnetometer OPMODE_ODR (0x4C) field encodings.
+// Bits 5-3: data rate. Bits 2-1: opmode. Bit 0: self-test.
+const (
+	MAG_ODR_10HZ = 0x00 << 3
+	MAG_ODR_2HZ  = 0x01 << 3
+	MAG_ODR_6HZ  = 0x02 << 3
+	MAG_ODR_8HZ  = 0x03 << 3
+	MAG_ODR_15HZ = 0x04 << 3
+	MAG_ODR_20HZ = 0x05 << 3
+	MAG_ODR_25HZ = 0x06 << 3
+	MAG_ODR_30HZ = 0x07 << 3
+
+	MAG_OPMODE_NORMAL = 0x00 << 1
+	MAG_OPMODE_FORCED = 0x01 << 1
+	MAG_OPMODE_SLEEP  = 0x03 << 1
 )
 
 // Magnetometer trim registers (compensation parameters)

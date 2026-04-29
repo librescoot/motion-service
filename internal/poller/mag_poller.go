@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"bmx-service/internal/bmx"
@@ -133,24 +134,29 @@ func (p *MagPoller) poll(ctx context.Context) error {
 	return p.publisher.PublishMagnetometerHeading(ctx, smoothedHeading)
 }
 
-// smoothHeading applies a moving average filter to heading values
+// smoothHeading applies a circular-mean filter to heading values.
+// A linear mean wraps incorrectly across 0°/360°: averaging 358° and 2°
+// gives 180° instead of 0°. Average the unit vectors and atan2 back out.
 func (p *MagPoller) smoothHeading(newHeading float64) float64 {
-	// Store new heading in circular buffer
 	p.headingHistory[p.historyIndex] = newHeading
 	p.historyIndex = (p.historyIndex + 1) % headingSmoothingSamples
 
-	// Track initialization
 	if p.initialized < headingSmoothingSamples {
 		p.initialized++
 	}
 
-	// Calculate average
-	var sum float64
-	samplestoUse := p.initialized
-
-	for i := 0; i < samplestoUse; i++ {
-		sum += p.headingHistory[i]
+	var sumSin, sumCos float64
+	for i := 0; i < p.initialized; i++ {
+		rad := p.headingHistory[i] * math.Pi / 180.0
+		sumSin += math.Sin(rad)
+		sumCos += math.Cos(rad)
 	}
 
-	return sum / float64(samplestoUse)
+	if sumSin == 0 && sumCos == 0 {
+		return newHeading
+	}
+
+	avgDeg := math.Atan2(sumSin, sumCos) * 180.0 / math.Pi
+	avgDeg = math.Mod(avgDeg+360.0, 360.0)
+	return avgDeg
 }
