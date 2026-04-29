@@ -1,0 +1,30 @@
+[Unit]
+Description=BMX055 calibration data capture
+Documentation=https://github.com/librescoot/bmx-service
+# Take exclusive ownership of the BMX055. Conflicts= stops these units when
+# bmx-calibrate starts; After= ensures we wait for them to release the I2C
+# bus before we initialize the chip.
+Conflicts=librescoot-alarm.service librescoot-bmx.service
+After=librescoot-alarm.service librescoot-bmx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bmx-calibrate \
+    --i2c-bus=/dev/i2c-3 \
+    --rate=20 \
+    --preset=highacc \
+    --progress-every=2s
+# Bring librescoot-alarm back up when the capture stops, so the scooter is
+# usable again without manual intervention. systemd's Conflicts= is one-shot
+# (it stops the conflicting unit on start, but doesn't restart it on stop),
+# and a Wants= from a target is also evaluated only at unit-start time —
+# there's no built-in "when X stops, restart Y" relationship. The leading
+# dash ignores errors; --no-block returns immediately so we don't sit in
+# stop-post for the full 90 s timeout waiting for alarm-service to be up.
+ExecStopPost=-/bin/systemctl --no-block start librescoot-alarm.service
+StandardOutput=journal
+StandardError=journal
+Restart=no
+
+# No [Install] section by design — this is a manually-triggered diagnostic
+# unit. Use `systemctl start bmx-calibrate.service` directly.

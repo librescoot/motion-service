@@ -97,6 +97,60 @@ scp bin/bmx-service root@10.7.0.4:/usr/bin/
 ssh root@10.7.0.4 "systemctl daemon-reload && systemctl restart librescoot-bmx"
 ```
 
+## Magnetometer calibration capture
+
+`bmx-calibrate` is a one-shot diagnostic binary that captures raw
+magnetometer + accelerometer + gyroscope data to a CSV in `/data/`. Use
+it to derive hard-iron and (with enough orientation coverage) soft-iron
+calibration for a particular vehicle.
+
+```bash
+make build
+scp bin/bmx-calibrate systemd/bmx-calibrate.service root@10.7.0.4:/data/
+ssh root@10.7.0.4 'cp /data/bmx-calibrate /usr/bin/ \
+  && cp /data/bmx-calibrate.service /etc/systemd/system/ \
+  && systemctl daemon-reload'
+```
+
+The unit `Conflicts=` with `librescoot-alarm` and `librescoot-bmx`, so
+starting it stops whichever is currently using the BMX055. On stop it
+brings `librescoot-alarm` back up via `systemctl --no-block start`.
+
+```bash
+# Start a capture (alarm-service stops automatically)
+ssh deep-blue systemctl start bmx-calibrate
+
+# ... rotate the scooter (driving a circle works for X/Y hard-iron) ...
+
+# Stop the capture (alarm-service comes back up)
+ssh deep-blue systemctl stop bmx-calibrate
+
+# Output CSV is at /data/bmx-cal-<unix-ts>.csv
+ssh deep-blue ls -lh /data/bmx-cal-\*.csv
+```
+
+Live progress is logged to journald every 2 seconds:
+```
+samples=80 rate_hz=19.9 x="[-27,-20] span=7" y="[53,70] span=17"
+  z="[101,107] span=6" hard_iron_xyz=[-23,61,104]
+```
+
+A high-quality hard-iron capture should produce X and Y spans of
+roughly 2 × Earth's horizontal field (≈ ±480 LSB peak-to-peak in
+Berlin, so a span around 950 LSB after a full 360° rotation).
+
+CSV columns:
+```
+timestamp_ms, mag_raw_x, mag_raw_y, mag_raw_z, mag_rhall, mag_drdy,
+mag_comp_x, mag_comp_y, mag_comp_z, ax_g, ay_g, az_g,
+gx_dps, gy_dps, gz_dps
+```
+
+Raw values are int16 ADC outputs (13-bit X/Y, 15-bit Z) — these are
+what an offline ellipsoid fit operates on. Compensated values are in
+1/16 µT/LSB (480 LSB ≈ 30 µT) and shown for sanity-checking the
+chip's response.
+
 ## Testing
 
 ```bash

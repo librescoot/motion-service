@@ -216,161 +216,158 @@ func (m *Magnetometer) readTrimData() error {
 	return nil
 }
 
-// readRhall reads the Hall resistance value needed for compensation
-func (m *Magnetometer) readRhall() (uint16, error) {
-	lsb, err := m.ReadByteData(MAG_RHALL_LSB)
-	if err != nil {
-		return 0, err
-	}
-	msb, err := m.ReadByteData(MAG_RHALL_MSB)
-	if err != nil {
-		return 0, err
-	}
-
-	// Combine LSB and MSB, shift right by 2 (14-bit value)
-	rhall := (uint16(msb) << 6) | (uint16(lsb) >> 2)
-	return rhall, nil
-}
-
 // compensateX applies temperature compensation to X-axis magnetometer data.
-// Mirrors the Bosch BMM150 reference compensation flow; intermediates that
-// shift dig_xyz1 left by 14 must be 32-bit — uint16<<14 truncates the value
-// to ~zero and silently breaks compensation.
+// All intermediates are int64 — the equivalent C formula overflows int32
+// for typical earth-field readings (mag * inner ≈ 6e10 with normal trim
+// values, exceeding the int32 range).
+//
+// Output is in 1/16 µT per LSB, so a 30 µT field yields ≈ 480 LSB. This
+// is the scale used downstream in ReadDataInMicroTesla (which divides by
+// 16) and matches the convention of the Linux IIO magnetometer drivers.
 func (m *Magnetometer) compensateX(magDataX int16, dataRhall uint16) int16 {
-	if magDataX == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL {
+	if magDataX == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL ||
+		dataRhall == 0 || m.trimData.digXYZ1 == 0 {
 		return BMM150_OVERFLOW_OUTPUT
 	}
 
-	var processCompX2 int32
-	if dataRhall != 0 {
-		processCompX1 := uint32(m.trimData.digXYZ1) << 14
-		processCompX2 = int32(processCompX1 / uint32(dataRhall))
-	}
-
-	retval := int16(processCompX2)
-	processCompX3 := uint16(retval) - 16384
-	retval = int16(m.trimData.digX2) +
-		int16((int32(m.trimData.digX1)*int32(processCompX3))>>15)
-	processCompX4 := int32(magDataX) * int32(retval)
-	retval = int16(processCompX4 / 4096)
-	processCompX5 := int32(retval) * int32(m.trimData.digXY2)
-	retval = int16((processCompX5 + 16384) / 32768)
-	retval = int16(int32(m.trimData.digXY1)*int32(retval)) + retval
-	retval = int16((int32(retval) + 16384) / 32768)
-
-	return retval
+	val := int64(uint32(m.trimData.digXYZ1)<<14/uint32(dataRhall)) - 0x4000
+	inner := ((int64(m.trimData.digXY2)*(val*val>>7) +
+		val*(int64(m.trimData.digXY1)<<7)) >> 9) + 0x100000
+	inner = inner * (int64(int16(m.trimData.digX2)) + 0xA0) >> 12
+	return int16((int64(magDataX)*inner)>>13 + int64(m.trimData.digX1)<<3)
 }
 
 // compensateY applies temperature compensation to Y-axis magnetometer data.
-// Same uint16<<14 overflow fix as compensateX.
+// Same structure as compensateX with digY1/digY2 substituted; digXY1/XY2
+// are shared cross-axis trim values.
 func (m *Magnetometer) compensateY(magDataY int16, dataRhall uint16) int16 {
-	if magDataY == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL {
+	if magDataY == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL ||
+		dataRhall == 0 || m.trimData.digXYZ1 == 0 {
 		return BMM150_OVERFLOW_OUTPUT
 	}
 
-	var processCompY2 int32
-	if dataRhall != 0 {
-		processCompY1 := uint32(m.trimData.digXYZ1) << 14
-		processCompY2 = int32(processCompY1 / uint32(dataRhall))
-	}
-
-	retval := int16(processCompY2)
-	processCompY3 := uint16(retval) - 16384
-	retval = int16(m.trimData.digY2) +
-		int16((int32(m.trimData.digY1)*int32(processCompY3))>>15)
-	processCompY4 := int32(magDataY) * int32(retval)
-	retval = int16(processCompY4 / 4096)
-
-	return retval
+	val := int64(uint32(m.trimData.digXYZ1)<<14/uint32(dataRhall)) - 0x4000
+	inner := ((int64(m.trimData.digXY2)*(val*val>>7) +
+		val*(int64(m.trimData.digXY1)<<7)) >> 9) + 0x100000
+	inner = inner * (int64(int16(m.trimData.digY2)) + 0xA0) >> 12
+	return int16((int64(magDataY)*inner)>>13 + int64(m.trimData.digY1)<<3)
 }
 
-// compensateZ applies temperature compensation to Z-axis magnetometer data
+// compensateZ applies temperature compensation to Z-axis magnetometer data.
+// The Z formula is structurally different from X/Y — it uses dig_z1..dig_z4
+// and digXYZ1, with a denominator built from dig_z1 * rhall. int64 math
+// throughout to avoid the int32 overflow in (mag - dig_z4) << 15 * 1000.
+//
+// Output is in 1/16 µT per LSB, matching X/Y.
 func (m *Magnetometer) compensateZ(magDataZ int16, dataRhall uint16) int16 {
-	// Check for overflow
-	if magDataZ == BMM150_ZAXIS_HALL_OVERFLOW_ADCVAL {
-		return BMM150_OVERFLOW_OUTPUT
-	}
-
-	// Check for division by zero conditions
-	if m.trimData.digZ2 == 0 || m.trimData.digZ1 == 0 ||
+	if magDataZ == BMM150_ZAXIS_HALL_OVERFLOW_ADCVAL ||
+		m.trimData.digZ2 == 0 || m.trimData.digZ1 == 0 ||
 		m.trimData.digXYZ1 == 0 || dataRhall == 0 {
 		return BMM150_OVERFLOW_OUTPUT
 	}
 
-	processCompZ1 := int16(dataRhall) - int16(m.trimData.digXYZ1)
-	processCompZ3 := int32(m.trimData.digZ1) * (int32(magDataZ) << 14)
-	processCompZ4 := int16((processCompZ3 - (16384 * 16384)) /
-		(int32(m.trimData.digZ2) +
-			(int32(m.trimData.digZ4)*int32(processCompZ1))/32768))
-	retval := int32(processCompZ4) + (int32(m.trimData.digZ2) * 8192)
-	retval = retval / 16384
+	a := (int64(magDataZ) - int64(m.trimData.digZ4)) << 15
+	dr := int64(int16(dataRhall)) - int64(int16(m.trimData.digXYZ1))
+	b := int64(m.trimData.digZ3) * dr >> 2
+	num := a - b
 
-	return int16(retval)
+	inner := (int64(m.trimData.digZ1)*int64(int16(dataRhall))<<1 + 1<<15) >> 16
+	// int16 truncation mirrors the C reference. For typical trim/rhall
+	// pairs the value fits, so this is a no-op; for pathological inputs
+	// it wraps the way the C code does.
+	den := int64(m.trimData.digZ2) + int64(int16(inner))
+	if den == 0 {
+		return BMM150_OVERFLOW_OUTPUT
+	}
+
+	out := num / den
+	switch {
+	case out > math.MaxInt16:
+		return math.MaxInt16
+	case out < math.MinInt16:
+		return math.MinInt16
+	}
+	return int16(out)
 }
 
-// ReadData reads raw magnetometer data and applies temperature compensation
-func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
+// ReadRaw reads the magnetometer's pre-compensation 13/15-bit ADC outputs
+// plus the 14-bit Hall resistance value and the data-ready flag. Use this
+// for calibration capture — it's the chip output before any temperature
+// compensation, which is what offline ellipsoid fits operate on.
+//
+// drdy is true if the chip reports that this sample is fresh (DRDY bit in
+// register 0x48). Polling faster than ODR will return drdy=false on the
+// repeat reads.
+func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err error) {
 	xLSB, err := m.ReadByteData(MAG_DATAX_LSB)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
 	xMSB, err := m.ReadByteData(MAG_DATAX_LSB + 1)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
-
 	yLSB, err := m.ReadByteData(MAG_DATAY_LSB)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
 	yMSB, err := m.ReadByteData(MAG_DATAY_LSB + 1)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
-
 	zLSB, err := m.ReadByteData(MAG_DATAZ_LSB)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
 	zMSB, err := m.ReadByteData(MAG_DATAZ_LSB + 1)
 	if err != nil {
-		return 0, 0, 0, err
+		return
 	}
-
-	// Read Hall resistance for temperature compensation
-	rhall, err := m.readRhall()
+	rhallLSB, err := m.ReadByteData(MAG_RHALL_LSB)
 	if err != nil {
-		return 0, 0, 0, err
+		return
+	}
+	rhallMSB, err := m.ReadByteData(MAG_RHALL_MSB)
+	if err != nil {
+		return
 	}
 
-	// Extract raw magnetometer values
+	// X/Y are 13-bit signed: 5 bits in LSB[7:3], 8 bits in MSB[7:0].
 	xRaw := (uint16(xMSB) << 5) | (uint16(xLSB) >> 3)
 	yRaw := (uint16(yMSB) << 5) | (uint16(yLSB) >> 3)
-
-	// Sign extend 13-bit values to 16-bit
 	if xRaw&0x1000 != 0 {
 		xRaw |= 0xE000
 	}
 	if yRaw&0x1000 != 0 {
 		yRaw |= 0xE000
 	}
-	xRawSigned := int16(xRaw)
-	yRawSigned := int16(yRaw)
 
+	// Z is 15-bit signed: 7 bits in LSB[7:1], 8 bits in MSB[7:0].
 	zRaw := (uint16(zMSB) << 7) | (uint16(zLSB) >> 1)
-
-	// Sign extend 15-bit value to 16-bit
 	if zRaw&0x4000 != 0 {
 		zRaw |= 0x8000
 	}
-	zRawSigned := int16(zRaw)
 
-	// Apply temperature compensation
-	x = m.compensateX(xRawSigned, rhall)
-	y = m.compensateY(yRawSigned, rhall)
-	z = m.compensateZ(zRawSigned, rhall)
+	// RHALL is 14-bit unsigned: 6 bits in LSB[7:2], 8 bits in MSB[7:0].
+	// LSB bit 0 is the data-ready status.
+	rhall = (uint16(rhallMSB) << 6) | (uint16(rhallLSB) >> 2)
+	drdy = rhallLSB&0x01 != 0
 
-	return x, y, z, nil
+	return int16(xRaw), int16(yRaw), int16(zRaw), rhall, drdy, nil
+}
+
+// ReadData reads the magnetometer's data registers and returns
+// temperature-compensated values in chip "1/16 µT" units. For calibration
+// capture use ReadRaw instead.
+func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
+	rawX, rawY, rawZ, rhall, _, err := m.ReadRaw()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return m.compensateX(rawX, rhall),
+		m.compensateY(rawY, rhall),
+		m.compensateZ(rawZ, rhall),
+		nil
 }
 
 // SetCalibration replaces the runtime calibration used by ReadDataInMicroTesla
