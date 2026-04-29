@@ -37,8 +37,13 @@ func NewSensorPoller(
 		mag:       mag,
 		publisher: publisher,
 		rateHz:    rateHz,
-		enabled:   false,
-		log:       log,
+		// Default on — bmx-service is the primary IMU producer in the
+		// post-split architecture, and downstream consumers (the debug
+		// screen, future heading code in scootui-qt) need a continuous
+		// stream out of the box. The streaming:disable command is still
+		// available for callers that want to silence it.
+		enabled: true,
+		log:     log,
 	}
 }
 

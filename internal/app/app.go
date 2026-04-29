@@ -158,7 +158,7 @@ func (a *App) publishInitialStatus(ctx context.Context) error {
 	status := map[string]string{
 		"initialized":              "true",
 		"polling-rate-hz":          fmt.Sprintf("%d", a.cfg.PollingRate),
-		"streaming":                "disabled",
+		"streaming":                "enabled",
 		"interrupt":                "disabled",
 		"pin":                      "none",
 		"threshold":                "0x00",
