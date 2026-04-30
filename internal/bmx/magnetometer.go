@@ -58,7 +58,11 @@ type Calibration struct {
 // +Z with vehicle down (chip is mounted face-down on the PCB underside,
 // which makes its package-top-out direction point into the chassis).
 //
-// YawOffsetDeg still needs the known-North check after this lands.
+// YawOffsetDeg derived from a known-North check on Deep Blue: with the
+// scooter approximately facing magnetic North, the unrotated heading
+// read 253°, so we add 107° to bring 253 → 360 (= 0). Approximate; will
+// refine after the next calibration run captures a clean known-North
+// reference.
 var DefaultCalibration = Calibration{
 	HardIronOffset: [3]int16{13, 339, 989},
 	Orientation: Orientation{
@@ -82,7 +86,7 @@ var DefaultCalibration = Calibration{
 		AxisOrder: [3]int{1, 0, 2},
 		AxisSign:  [3]float64{-1, 1, 1},
 	},
-	YawOffsetDeg: 0,
+	YawOffsetDeg: 107,
 }
 
 // Magnetometer represents the BMX055 magnetometer
