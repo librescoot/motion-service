@@ -63,17 +63,24 @@ var DefaultCalibration = Calibration{
 	HardIronOffset: [3]int16{13, 339, 989},
 	Orientation: Orientation{
 		// AxisOrder=[1,0,2]: vehicle X comes from sensor Y, vehicle Y
-		// from sensor X, vehicle Z from sensor Z.
-		// AxisSign=[-1,-1,+1]:
-		//   Lean LEFT → sensor.gy > 0 → must give negative ω_x in NED
-		//     (right-hand rule: positive ω_x rolls top to the right);
-		//     so vehicle.X = -sensor.Y.
-		//   Pitch UP → sensor.gx > 0 → must give negative ω_y in NED
-		//     (positive ω_y is pitch DOWN); so vehicle.Y = -sensor.X.
-		//   Accel sensor.z reads ≈-1 g at rest → chip +Z already points
-		//     down; vehicle.Z = +sensor.Z.
+		// from sensor X, vehicle Z from sensor Z. The chip is rotated
+		// 90° on the PCB so its +Y axis points to the vehicle's rear
+		// and its +X axis to the vehicle's right — confirmed by the
+		// gyro response to lean and pitch.
+		// AxisSign=[-1,+1,+1]:
+		//   Lean LEFT → sensor.gy > 0. In NED, lean LEFT is ω_x < 0
+		//     (positive ω_x by right-hand rule rolls top to the right).
+		//     With chip +Y pointing rearward (= -vehicle X), sensor.gy
+		//     = -ω_x > 0 ✓. Mapping: vehicle.x = -1 * sensor.y.
+		//   Pitch UP → sensor.gx > 0. In NED, pitch UP is ω_y > 0
+		//     (right-hand rule: thumb +Y/right, curl from +Z/down to
+		//     +X/forward — the body's down tips toward forward = nose
+		//     up). With chip +X pointing to vehicle +Y (right),
+		//     sensor.gx = +ω_y. Mapping: vehicle.y = +1 * sensor.x.
+		//   Accel sensor.z ≈ -1 g at rest → chip +Z already aligned
+		//     with NED +Z (down). vehicle.z = +1 * sensor.z.
 		AxisOrder: [3]int{1, 0, 2},
-		AxisSign:  [3]float64{-1, -1, 1},
+		AxisSign:  [3]float64{-1, 1, 1},
 	},
 	YawOffsetDeg: 0,
 }
