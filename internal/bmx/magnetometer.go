@@ -41,23 +41,26 @@ type Calibration struct {
 // Other vehicles will need their own values — run bmx-calibrate, drive a
 // few circles, and use the JSON summary to set HardIronOffset.
 //
-// HardIronOffset captured 2026-04-29 with bmx-calibrate over ~5.6 full
-// rotations on Deep Blue (CW + CCW circles + figure-8s). The Y offset of
-// +320 LSB (~20 µT) is the battery/motor pack's lateral magnetization;
-// the Z offset of +996 LSB (~62 µT) is the steel chassis sheet directly
-// below the sensor — its residual magnetization actually exceeds Earth's
-// vertical field at this distance.
+// HardIronOffset refined 2026-04-30 from a 4726-sample sphere fit over
+// the original calibration captures (CW + CCW circles + figure-8s).
+// Sphere fit beats per-axis min/max midpoint when the rotation pattern
+// doesn't fully separate Z hard iron from Earth's vertical projection —
+// the multi-axis residual minimization couples the constraints.
+//
+// Sphere-fit radius came out at ~14 µT vs Berlin's 49.5 µT total field;
+// the trace is significantly non-spherical (soft iron from the steel
+// chassis sheet beneath the sensor compresses the field along Z). For a
+// fully linear heading response this would benefit from an ellipsoid
+// fit, but the sphere-fit center alone is a defensible hard iron.
 //
 // Orientation derived from gyro observation on the bmx-debug screen:
-// gyro Y reads positive on left lean, X on pitch up, Z on yaw — meaning
 // chip +Y aligns with vehicle forward, chip +X with vehicle right, chip
-// +Z with vehicle down (the chip is mounted face-down on the PCB
-// underside, which makes its package-top-out direction point into the
-// chassis = vehicle-down).
+// +Z with vehicle down (chip is mounted face-down on the PCB underside,
+// which makes its package-top-out direction point into the chassis).
 //
 // YawOffsetDeg still needs the known-North check after this lands.
 var DefaultCalibration = Calibration{
-	HardIronOffset: [3]int16{-9, 320, 996},
+	HardIronOffset: [3]int16{13, 339, 989},
 	Orientation: Orientation{
 		// AxisOrder=[1,0,2]: vehicle X comes from sensor Y, vehicle Y
 		// from sensor X, vehicle Z from sensor Z.
