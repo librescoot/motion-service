@@ -93,14 +93,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Disable hard-iron / axis-sign baked into Magnetometer so anything
+	// Disable hard-iron / orientation baked into Magnetometer so anything
 	// that reads µT here represents the raw chip output. We don't actually
 	// log µT to the CSV, but a future revision might, and this keeps
 	// downstream consumers honest.
 	mag.SetCalibration(bmx.Calibration{
 		HardIronOffset: [3]int16{0, 0, 0},
-		AxisSign:       [3]float64{1, 1, 1},
-		YawOffsetDeg:   0,
+		Orientation: bmx.Orientation{
+			AxisOrder: [3]int{0, 1, 2},
+			AxisSign:  [3]float64{1, 1, 1},
+		},
+		YawOffsetDeg: 0,
 	})
 
 	f, err := os.Create(*output)

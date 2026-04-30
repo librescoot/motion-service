@@ -11,14 +11,22 @@ import (
 )
 
 const (
-	magPollingRateHz        = 5
-	headingSmoothingSamples = 3
+	magPollingRateHz = 5
 
 	// Tilt-comp inputs are unreliable when the body frame is undergoing
 	// significant non-gravity acceleration; ay²+az²+ax² ≠ 1g means the accel
 	// vector isn't pure gravity. Above this excess we report tilt_compensated
-	// = false and fall back to the X/Y-only heading.
-	tiltCompMaxExcessG = 0.20
+	// = false and fall back to the X/Y-only heading. Tightened from 0.20 to
+	// 0.05 g after observing heading deflection during normal scooter
+	// throttle bursts (typical forward acceleration on a 2 kW scooter is
+	// 0.1–0.3 g; the looser threshold let those leak into the tilt-comp).
+	tiltCompMaxExcessG = 0.05
+
+	// Heading smoothing α. EMA on unit vectors (sin/cos) of the heading;
+	// time constant τ = -1/(rate·ln(1-α)). At 5 Hz with α = 0.15, τ ≈ 1.2 s
+	// — heavier than the previous 3-sample circular mean (~0.6 s) but
+	// follows fast slews (a hard turn) within ~3 s. Tunable per-vehicle.
+	headingEMAAlpha = 0.15
 
 	// Datasheet ±2.5° heading accuracy at the Regular preset; we treat that
 	// as the floor and add penalties for tilt, dynamic accel, and yaw rate.
@@ -34,10 +42,11 @@ type MagPoller struct {
 	publisher *redis.Publisher
 	log       *slog.Logger
 
-	headingHistory []float64
-	historyIndex   int
-	initialized    int
-	pollCount      int
+	// Heading EMA state, on unit vectors so wrap is handled naturally.
+	emaSin, emaCos float64
+	emaInit        bool
+
+	pollCount int
 }
 
 // NewMagPoller creates a MagPoller. accel and gyro may be nil; without an
@@ -50,12 +59,11 @@ func NewMagPoller(
 	log *slog.Logger,
 ) *MagPoller {
 	return &MagPoller{
-		mag:            mag,
-		accel:          accel,
-		gyro:           gyro,
-		publisher:      publisher,
-		log:            log,
-		headingHistory: make([]float64, headingSmoothingSamples),
+		mag:       mag,
+		accel:     accel,
+		gyro:      gyro,
+		publisher: publisher,
+		log:       log,
 	}
 }
 
@@ -95,15 +103,15 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		return err
 	}
 
-	// Pull accel + gyro for tilt comp and quality estimate. Either failing
-	// just means we publish without that input — better than dropping the
-	// heading entirely.
+	// Pull accel + gyro for tilt comp and quality estimate, in vehicle
+	// frame. Either failing just means we publish without that input.
+	orientation := p.mag.Orientation()
 	var (
 		ax, ay, az, aMag float64
 		hasAccel         bool
 	)
 	if p.accel != nil {
-		ax, ay, az, aMag, err = p.accel.ReadDataInG()
+		ax, ay, az, aMag, err = p.accel.ReadDataInGVehicleFrame(orientation)
 		if err != nil {
 			p.log.Warn("accel read failed, skipping tilt comp", "error", err)
 		} else {
@@ -113,12 +121,12 @@ func (p *MagPoller) poll(ctx context.Context) error {
 
 	var yawRateDPS float64
 	if p.gyro != nil {
-		gx, gy, gz, _, gerr := p.gyro.ReadDataInDPS()
+		_, _, _, gMag, gerr := p.gyro.ReadDataInDPSVehicleFrame(orientation)
 		if gerr == nil {
 			// Total angular speed; the gyro Z component alone misses cases
 			// where the scooter is rolling/pitching. For "is the heading
 			// changing fast right now" the magnitude is the better signal.
-			yawRateDPS = math.Sqrt(gx*gx + gy*gy + gz*gz)
+			yawRateDPS = gMag
 		}
 	}
 
@@ -211,29 +219,31 @@ func estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS float64, tiltCompensated b
 	return a
 }
 
-// smoothHeading applies a circular-mean filter to heading values.
-// A linear mean wraps incorrectly across 0°/360°: averaging 358° and 2°
-// gives 180° instead of 0°. Average the unit vectors and atan2 back out.
+// smoothHeading applies an EMA filter on the unit-vector representation
+// of the heading. EMA on (sin, cos) handles 0°/360° wrap naturally — at
+// the wraparound the components transition smoothly, while a linear EMA
+// on degrees would jump 360° and contaminate the average for many samples.
+//
+// The previous version used a 3-sample circular mean. EMA gives a much
+// smoother trace for the same effective time constant, has no warm-up
+// (initial sample seeds the state), and is tunable via headingEMAAlpha.
 func (p *MagPoller) smoothHeading(newHeading float64) float64 {
-	p.headingHistory[p.historyIndex] = newHeading
-	p.historyIndex = (p.historyIndex + 1) % headingSmoothingSamples
+	rad := newHeading * math.Pi / 180.0
+	s := math.Sin(rad)
+	c := math.Cos(rad)
 
-	if p.initialized < headingSmoothingSamples {
-		p.initialized++
+	if !p.emaInit {
+		p.emaSin, p.emaCos = s, c
+		p.emaInit = true
+	} else {
+		p.emaSin = headingEMAAlpha*s + (1-headingEMAAlpha)*p.emaSin
+		p.emaCos = headingEMAAlpha*c + (1-headingEMAAlpha)*p.emaCos
 	}
 
-	var sumSin, sumCos float64
-	for i := 0; i < p.initialized; i++ {
-		rad := p.headingHistory[i] * math.Pi / 180.0
-		sumSin += math.Sin(rad)
-		sumCos += math.Cos(rad)
-	}
-
-	if sumSin == 0 && sumCos == 0 {
+	if p.emaSin == 0 && p.emaCos == 0 {
 		return newHeading
 	}
 
-	avgDeg := math.Atan2(sumSin, sumCos) * 180.0 / math.Pi
-	avgDeg = math.Mod(avgDeg+360.0, 360.0)
-	return avgDeg
+	avgDeg := math.Atan2(p.emaSin, p.emaCos) * 180.0 / math.Pi
+	return math.Mod(avgDeg+360.0, 360.0)
 }

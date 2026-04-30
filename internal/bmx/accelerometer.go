@@ -79,7 +79,7 @@ func (a *Accelerometer) ReadData() (x, y, z int16, err error) {
 	return x, y, z, nil
 }
 
-// ReadDataInG reads acceleration data converted to g-force
+// ReadDataInG reads acceleration data converted to g-force in sensor frame.
 func (a *Accelerometer) ReadDataInG() (x, y, z, magnitude float64, err error) {
 	rawX, rawY, rawZ, err := a.ReadData()
 	if err != nil {
@@ -93,6 +93,19 @@ func (a *Accelerometer) ReadDataInG() (x, y, z, magnitude float64, err error) {
 	magnitude = math.Sqrt(x*x + y*y + z*z)
 
 	return x, y, z, magnitude, nil
+}
+
+// ReadDataInGVehicleFrame reads acceleration in g, transformed into the
+// vehicle frame described by the supplied Orientation. Magnitude is
+// frame-invariant; computed from the vehicle-frame components.
+func (a *Accelerometer) ReadDataInGVehicleFrame(o Orientation) (vx, vy, vz, magnitude float64, err error) {
+	sx, sy, sz, _, err := a.ReadDataInG()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	vx, vy, vz = o.Apply(sx, sy, sz)
+	magnitude = math.Sqrt(vx*vx + vy*vy + vz*vz)
+	return vx, vy, vz, magnitude, nil
 }
 
 // ConfigureSlowNoMotion configures slow/no-motion detection

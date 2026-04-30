@@ -21,19 +21,19 @@ type TrimData struct {
 	digXYZ1 uint16
 }
 
-// Calibration holds runtime-tunable magnetometer calibration.
+// Calibration holds runtime-tunable magnetometer calibration plus the
+// vehicle-frame Orientation that's shared with the accel/gyro readers.
 //
-// HardIronOffset is subtracted from the raw 16-bit (post-compensation) value
-// before scaling to µT — i.e. the same units the chip reports. Capture by
-// rotating the vehicle 360° in place and taking (max+min)/2 per axis.
+// HardIronOffset is in chip-native compensated LSB units (1/16 µT/LSB)
+// in SENSOR frame — capture by rotating the vehicle 360° in place and
+// taking (max+min)/2 per axis from bmx-calibrate's CSV.
 //
-// AxisSign and YawOffsetDeg map sensor-frame µT to vehicle-frame µT used
-// for the heading calculation. AxisSign is ±1 per axis; YawOffsetDeg is
-// added to the final compass heading. These cover the common cases where
-// the BMX055 is mounted upside-down or rotated relative to vehicle forward.
+// Orientation maps sensor frame to vehicle NED (X-forward, Y-right,
+// Z-down). YawOffsetDeg is added to the final compass heading to align
+// with magnetic North after the orientation transform.
 type Calibration struct {
 	HardIronOffset [3]int16
-	AxisSign       [3]float64
+	Orientation    Orientation
 	YawOffsetDeg   float64
 }
 
@@ -48,14 +48,21 @@ type Calibration struct {
 // below the sensor — its residual magnetization actually exceeds Earth's
 // vertical field at this distance.
 //
-// AxisSign and YawOffsetDeg need post-deploy verification: spin the
-// scooter clockwise (looking from above) and confirm heading increases
-// 0→90→180→270 (otherwise flip a sign); park pointing magnetic North and
-// set YawOffsetDeg to whatever offset is needed to read 0.
+// Orientation derived from gyro observation on the bmx-debug screen:
+// gyro Y reads positive on left lean, X on pitch up, Z on yaw — meaning
+// chip +Y aligns with vehicle forward, chip +X with vehicle right, chip
+// +Z with vehicle down (the chip is mounted face-down on the PCB
+// underside, which makes its package-top-out direction point into the
+// chassis = vehicle-down).
+//
+// YawOffsetDeg still needs the known-North check after this lands.
 var DefaultCalibration = Calibration{
 	HardIronOffset: [3]int16{-9, 320, 996},
-	AxisSign:       [3]float64{-1, 1, -1},
-	YawOffsetDeg:   0,
+	Orientation: Orientation{
+		AxisOrder: [3]int{1, 0, 2},
+		AxisSign:  [3]float64{1, 1, 1},
+	},
+	YawOffsetDeg: 0,
 }
 
 // Magnetometer represents the BMX055 magnetometer
@@ -397,22 +404,33 @@ func (m *Magnetometer) Calibration() Calibration {
 // raw LSB → µT scale factor (per Bosch BMM150 reference).
 const magScaleUT = 16.0
 
-// ReadDataInMicroTesla reads the magnetometer in vehicle-frame µT with
-// hard-iron and axis-sign calibration applied. The Z axis is included so
-// that consumers can do their own tilt compensation if needed.
-func (m *Magnetometer) ReadDataInMicroTesla() (x, y, z, magnitude float64, err error) {
+// ReadDataInMicroTesla reads the magnetometer in vehicle-frame µT.
+// Hard-iron is subtracted in the sensor frame (in raw 1/16 µT/LSB units)
+// before the orientation transform permutes/sign-flips into vehicle NED
+// and divides through by magScaleUT.
+func (m *Magnetometer) ReadDataInMicroTesla() (vx, vy, vz, magnitude float64, err error) {
 	rawX, rawY, rawZ, err := m.ReadData()
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
 
 	cal := m.calibration
-	x = m.calibration.AxisSign[0] * float64(rawX-cal.HardIronOffset[0]) / magScaleUT
-	y = m.calibration.AxisSign[1] * float64(rawY-cal.HardIronOffset[1]) / magScaleUT
-	z = m.calibration.AxisSign[2] * float64(rawZ-cal.HardIronOffset[2]) / magScaleUT
-	magnitude = math.Sqrt(x*x + y*y + z*z)
+	sx := float64(rawX - cal.HardIronOffset[0])
+	sy := float64(rawY - cal.HardIronOffset[1])
+	sz := float64(rawZ - cal.HardIronOffset[2])
+	vx, vy, vz = cal.Orientation.Apply(sx, sy, sz)
+	vx /= magScaleUT
+	vy /= magScaleUT
+	vz /= magScaleUT
+	magnitude = math.Sqrt(vx*vx + vy*vy + vz*vz)
 
-	return x, y, z, magnitude, nil
+	return vx, vy, vz, magnitude, nil
+}
+
+// Orientation returns the orientation portion of the current calibration,
+// for sharing with the accel/gyro vehicle-frame readers.
+func (m *Magnetometer) Orientation() Orientation {
+	return m.calibration.Orientation
 }
 
 // HeadingFromVector computes a compass heading (0-360°, 0=North, 90=East)

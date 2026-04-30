@@ -15,6 +15,33 @@ const (
 	BMX055_MAG_ADDR   = 0x10
 )
 
+// Orientation maps the BMX055 chip's intrinsic XYZ axes onto a vehicle
+// body frame. All three sensors in the package (BMA253 accel, BMG160 gyro,
+// BMM150 mag) share the same axis system, so a single orientation applies
+// uniformly to whichever ReadDataIn*VehicleFrame helper the caller uses.
+//
+// AxisOrder maps each vehicle axis to a sensor index (0=X, 1=Y, 2=Z).
+// AxisSign is ±1 per VEHICLE axis, applied after permutation.
+//
+// Example: chip mounted face-down on the PCB underside and rotated 90° so
+// chip +Y points to vehicle forward, chip +X to vehicle right, chip +Z to
+// vehicle down (NED frame):
+//
+//	Orientation{AxisOrder: [3]int{1, 0, 2}, AxisSign: [3]float64{1, 1, 1}}
+type Orientation struct {
+	AxisOrder [3]int
+	AxisSign  [3]float64
+}
+
+// Apply maps a sensor-frame triple (sx, sy, sz) into the vehicle frame
+// described by this Orientation.
+func (o Orientation) Apply(sx, sy, sz float64) (vx, vy, vz float64) {
+	src := [3]float64{sx, sy, sz}
+	return o.AxisSign[0] * src[o.AxisOrder[0]],
+		o.AxisSign[1] * src[o.AxisOrder[1]],
+		o.AxisSign[2] * src[o.AxisOrder[2]]
+}
+
 // Accelerometer registers
 const (
 	ACCEL_CHIP_ID_REG          = 0x00

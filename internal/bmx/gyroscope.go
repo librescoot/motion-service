@@ -91,7 +91,8 @@ func (g *Gyroscope) ReadData() (x, y, z int16, err error) {
 	return x, y, z, nil
 }
 
-// ReadDataInDPS reads gyroscope data converted to degrees/second with bias compensation
+// ReadDataInDPS reads gyroscope data converted to degrees/second with bias
+// compensation, in sensor frame.
 func (g *Gyroscope) ReadDataInDPS() (x, y, z, magnitude float64, err error) {
 	rawX, rawY, rawZ, err := g.ReadData()
 	if err != nil {
@@ -106,6 +107,21 @@ func (g *Gyroscope) ReadDataInDPS() (x, y, z, magnitude float64, err error) {
 	magnitude = math.Sqrt(x*x + y*y + z*z)
 
 	return x, y, z, magnitude, nil
+}
+
+// ReadDataInDPSVehicleFrame reads gyro in °/s, transformed into the vehicle
+// frame described by the supplied Orientation. Note: gyro bias is captured
+// in sensor frame at boot, so the bias subtraction happens before the
+// frame transform — that's why we use the (sensor-frame) ReadDataInDPS
+// and then permute, rather than reading raw and applying both at once.
+func (g *Gyroscope) ReadDataInDPSVehicleFrame(o Orientation) (vx, vy, vz, magnitude float64, err error) {
+	sx, sy, sz, _, err := g.ReadDataInDPS()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	vx, vy, vz = o.Apply(sx, sy, sz)
+	magnitude = math.Sqrt(vx*vx + vy*vy + vz*vz)
+	return vx, vy, vz, magnitude, nil
 }
 
 // Calibrate performs gyroscope bias calibration by sampling when stationary

@@ -99,14 +99,25 @@ func (p *SensorPoller) Run(ctx context.Context) {
 	}
 }
 
-// poll reads all sensors and publishes the data
+// poll reads all sensors in vehicle frame and publishes the data. The
+// orientation comes from the magnetometer's calibration (the only place
+// it lives) — falls back to identity if no mag is wired so the service
+// still works without it.
 func (p *SensorPoller) poll(ctx context.Context) error {
-	accelX, accelY, accelZ, accelMag, err := p.accel.ReadDataInG()
+	orientation := bmx.Orientation{
+		AxisOrder: [3]int{0, 1, 2},
+		AxisSign:  [3]float64{1, 1, 1},
+	}
+	if p.mag != nil {
+		orientation = p.mag.Orientation()
+	}
+
+	accelX, accelY, accelZ, accelMag, err := p.accel.ReadDataInGVehicleFrame(orientation)
 	if err != nil {
 		return err
 	}
 
-	gyroX, gyroY, gyroZ, gyroMag, err := p.gyro.ReadDataInDPS()
+	gyroX, gyroY, gyroZ, gyroMag, err := p.gyro.ReadDataInDPSVehicleFrame(orientation)
 	if err != nil {
 		return err
 	}
