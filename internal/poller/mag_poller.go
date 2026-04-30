@@ -22,11 +22,15 @@ const (
 	// 0.1–0.3 g; the looser threshold let those leak into the tilt-comp).
 	tiltCompMaxExcessG = 0.05
 
-	// Heading smoothing α. EMA on unit vectors (sin/cos) of the heading;
-	// time constant τ = -1/(rate·ln(1-α)). At 5 Hz with α = 0.15, τ ≈ 1.2 s
-	// — heavier than the previous 3-sample circular mean (~0.6 s) but
-	// follows fast slews (a hard turn) within ~3 s. Tunable per-vehicle.
-	headingEMAAlpha = 0.15
+	// Three EMA smoothing levels for the heading, all on the (sin, cos)
+	// unit-vector representation so the 0°/360° wrap is handled
+	// naturally. Time constant τ = -dt / ln(1-α). At 5 Hz:
+	//   fast α=0.50 → τ ≈ 0.3 s   (responsive, removes single-sample noise)
+	//   med  α=0.15 → τ ≈ 1.2 s   (good balance — published as heading_deg)
+	//   slow α=0.05 → τ ≈ 3.9 s   (very stable, lags through hard turns)
+	headingEMAAlphaFast = 0.50
+	headingEMAAlphaMed  = 0.15
+	headingEMAAlphaSlow = 0.05
 
 	// Datasheet ±2.5° heading accuracy at the Regular preset; we treat that
 	// as the floor and add penalties for tilt, dynamic accel, and yaw rate.
@@ -42,9 +46,11 @@ type MagPoller struct {
 	publisher *redis.Publisher
 	log       *slog.Logger
 
-	// Heading EMA state, on unit vectors so wrap is handled naturally.
-	emaSin, emaCos float64
-	emaInit        bool
+	// Three EMA states on (sin, cos) unit vectors. Wrap-safe.
+	emaFastSin, emaFastCos float64
+	emaMedSin, emaMedCos   float64
+	emaSlowSin, emaSlowCos float64
+	emaInit                bool
 
 	pollCount int
 }
@@ -130,7 +136,12 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		}
 	}
 
-	// Compute heading. Tilt-compensate when accel data is plausibly gravity.
+	// Compute heading. Tilt-compensate when accel is plausibly gravity.
+	// rollRad/pitchRad below are NED-standard Tait-Bryan from accel — at
+	// rest in NED, accel = (0, 0, -g) so atan2(ay, az) = π. The tilt-comp
+	// math in HeadingFromVector handles that 180° offset correctly via
+	// sin/cos, but it's misleading as a *displayed* tilt magnitude. So
+	// we compute tiltDeg separately from the level-aware formula.
 	rollRad := math.NaN()
 	pitchRad := math.NaN()
 	tiltDeg := 0.0
@@ -143,15 +154,15 @@ func (p *MagPoller) poll(ctx context.Context) error {
 			pitchRad = math.Atan2(-ax, math.Sqrt(ay*ay+az*az))
 			tiltCompensated = true
 		}
-		// Report tilt regardless of whether comp was applied — the consumer
-		// can use it to gate the heading on its own terms.
-		r := math.Atan2(ay, az)
-		pi := math.Atan2(-ax, math.Sqrt(ay*ay+az*az))
-		tiltDeg = math.Max(math.Abs(r), math.Abs(pi)) * 180.0 / math.Pi
+		// Combined tilt from level: at rest level NED (0,0,-1g), the
+		// horizontal magnitude is 0 and -az = +1, so atan2 = 0. As the
+		// vehicle tilts away from level the horizontal component grows.
+		horiz := math.Sqrt(ax*ax + ay*ay)
+		tiltDeg = math.Atan2(horiz, -az) * 180.0 / math.Pi
 	}
 
 	rawHeading := p.mag.HeadingFromVector(magX, magY, magZ, rollRad, pitchRad)
-	smoothedHeading := p.smoothHeading(rawHeading)
+	headingFast, headingMed, headingSlow := p.smoothHeadings(rawHeading)
 
 	accuracy := estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS, tiltCompensated)
 
@@ -160,7 +171,7 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		p.log.Info("mag heading",
 			"raw_x", rawX, "raw_y", rawY, "raw_z", rawZ,
 			"uT_x", magX, "uT_y", magY, "uT_z", magZ, "uT_mag", magMag,
-			"heading", smoothedHeading,
+			"heading_med", headingMed,
 			"tilt_deg", tiltDeg,
 			"tilt_comp", tiltCompensated,
 			"excess_g", excessG,
@@ -176,8 +187,10 @@ func (p *MagPoller) poll(ctx context.Context) error {
 
 	reading := &redis.HeadingReading{
 		Timestamp:       time.Now().UnixMilli(),
-		HeadingDeg:      smoothedHeading,
+		HeadingDeg:      headingMed,
 		HeadingRawDeg:   rawHeading,
+		HeadingFastDeg:  headingFast,
+		HeadingSlowDeg:  headingSlow,
 		AccuracyDeg:     accuracy,
 		TiltCompensated: tiltCompensated,
 		TiltDeg:         tiltDeg,
@@ -219,31 +232,39 @@ func estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS float64, tiltCompensated b
 	return a
 }
 
-// smoothHeading applies an EMA filter on the unit-vector representation
-// of the heading. EMA on (sin, cos) handles 0°/360° wrap naturally — at
-// the wraparound the components transition smoothly, while a linear EMA
-// on degrees would jump 360° and contaminate the average for many samples.
+// smoothHeadings updates all three EMA filters on the (sin, cos) unit
+// vectors of the new heading and returns each as a degrees-in-[0,360)
+// triple. EMA on the unit vectors handles 0°/360° wrap naturally — a
+// linear EMA on degrees would lurch 360° at the wraparound and pollute
+// the average for many samples afterwards.
 //
-// The previous version used a 3-sample circular mean. EMA gives a much
-// smoother trace for the same effective time constant, has no warm-up
-// (initial sample seeds the state), and is tunable via headingEMAAlpha.
-func (p *MagPoller) smoothHeading(newHeading float64) float64 {
+// First sample seeds all three filters so there's no warm-up.
+func (p *MagPoller) smoothHeadings(newHeading float64) (fast, med, slow float64) {
 	rad := newHeading * math.Pi / 180.0
 	s := math.Sin(rad)
 	c := math.Cos(rad)
 
 	if !p.emaInit {
-		p.emaSin, p.emaCos = s, c
+		p.emaFastSin, p.emaFastCos = s, c
+		p.emaMedSin, p.emaMedCos = s, c
+		p.emaSlowSin, p.emaSlowCos = s, c
 		p.emaInit = true
 	} else {
-		p.emaSin = headingEMAAlpha*s + (1-headingEMAAlpha)*p.emaSin
-		p.emaCos = headingEMAAlpha*c + (1-headingEMAAlpha)*p.emaCos
+		p.emaFastSin = headingEMAAlphaFast*s + (1-headingEMAAlphaFast)*p.emaFastSin
+		p.emaFastCos = headingEMAAlphaFast*c + (1-headingEMAAlphaFast)*p.emaFastCos
+		p.emaMedSin = headingEMAAlphaMed*s + (1-headingEMAAlphaMed)*p.emaMedSin
+		p.emaMedCos = headingEMAAlphaMed*c + (1-headingEMAAlphaMed)*p.emaMedCos
+		p.emaSlowSin = headingEMAAlphaSlow*s + (1-headingEMAAlphaSlow)*p.emaSlowSin
+		p.emaSlowCos = headingEMAAlphaSlow*c + (1-headingEMAAlphaSlow)*p.emaSlowCos
 	}
 
-	if p.emaSin == 0 && p.emaCos == 0 {
-		return newHeading
+	toDeg := func(sn, cs float64) float64 {
+		if sn == 0 && cs == 0 {
+			return newHeading
+		}
+		return math.Mod(math.Atan2(sn, cs)*180.0/math.Pi+360.0, 360.0)
 	}
-
-	avgDeg := math.Atan2(p.emaSin, p.emaCos) * 180.0 / math.Pi
-	return math.Mod(avgDeg+360.0, 360.0)
+	return toDeg(p.emaFastSin, p.emaFastCos),
+		toDeg(p.emaMedSin, p.emaMedCos),
+		toDeg(p.emaSlowSin, p.emaSlowCos)
 }

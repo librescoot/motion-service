@@ -46,12 +46,14 @@ type InterruptEvent struct {
 // TiltDeg) — this is the data needed to do that, not a verdict.
 type HeadingReading struct {
 	Timestamp       int64   `json:"timestamp"`
-	HeadingDeg      float64 `json:"heading_deg"`       // smoothed compass heading [0,360)
-	HeadingRawDeg   float64 `json:"heading_raw_deg"`   // unsmoothed, this sample only
-	AccuracyDeg     float64 `json:"accuracy_deg"`      // heuristic 1-σ estimate
-	TiltCompensated bool    `json:"tilt_compensated"`  // false → X/Y-only fallback
-	TiltDeg         float64 `json:"tilt_deg"`          // max(|roll|,|pitch|) from accel
-	MagStrengthUT   float64 `json:"mag_strength_ut"`   // |B| in vehicle frame
-	ExcessG         float64 `json:"excess_g"`          // ||a|-1g| — non-gravity accel
-	YawRateDPS      float64 `json:"yaw_rate_dps"`      // |gyro| total turn rate
+	HeadingDeg      float64 `json:"heading_deg"`      // medium EMA, the canonical "smoothed" value
+	HeadingRawDeg   float64 `json:"heading_raw_deg"`  // unsmoothed, this sample only
+	HeadingFastDeg  float64 `json:"heading_fast_deg"` // fast EMA, τ ≈ 0.3 s — responsive
+	HeadingSlowDeg  float64 `json:"heading_slow_deg"` // slow EMA, τ ≈ 3.9 s — stable
+	AccuracyDeg     float64 `json:"accuracy_deg"`     // heuristic 1-σ estimate
+	TiltCompensated bool    `json:"tilt_compensated"` // false → X/Y-only fallback
+	TiltDeg         float64 `json:"tilt_deg"`         // angle from level (0 at rest)
+	MagStrengthUT   float64 `json:"mag_strength_ut"`  // |B| in vehicle frame
+	ExcessG         float64 `json:"excess_g"`         // ||a|-1g| — non-gravity accel
+	YawRateDPS      float64 `json:"yaw_rate_dps"`     // |gyro| total turn rate
 }

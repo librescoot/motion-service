@@ -59,8 +59,18 @@ type Calibration struct {
 var DefaultCalibration = Calibration{
 	HardIronOffset: [3]int16{-9, 320, 996},
 	Orientation: Orientation{
+		// AxisOrder=[1,0,2]: vehicle X comes from sensor Y, vehicle Y
+		// from sensor X, vehicle Z from sensor Z.
+		// AxisSign=[-1,-1,+1]:
+		//   Lean LEFT → sensor.gy > 0 → must give negative ω_x in NED
+		//     (right-hand rule: positive ω_x rolls top to the right);
+		//     so vehicle.X = -sensor.Y.
+		//   Pitch UP → sensor.gx > 0 → must give negative ω_y in NED
+		//     (positive ω_y is pitch DOWN); so vehicle.Y = -sensor.X.
+		//   Accel sensor.z reads ≈-1 g at rest → chip +Z already points
+		//     down; vehicle.Z = +sensor.Z.
 		AxisOrder: [3]int{1, 0, 2},
-		AxisSign:  [3]float64{1, 1, 1},
+		AxisSign:  [3]float64{-1, -1, 1},
 	},
 	YawOffsetDeg: 0,
 }
