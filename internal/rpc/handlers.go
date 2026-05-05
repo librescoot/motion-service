@@ -11,12 +11,16 @@ import (
 	"github.com/librescoot/motion-service/internal/profile"
 )
 
-// Channel names for the RPC primitives motion-service exposes.
+// Channel is the per-service RPC request channel. Method dispatch happens
+// inside the CallServer based on the envelope's method field.
+const Channel = "motion:rpc"
+
+// Method names for the RPCs motion-service exposes.
 const (
-	ChannelPrepareHibernation = "motion:rpc:prepare-hibernation"
-	ChannelGetCalibration     = "motion:rpc:get-calibration"
-	ChannelClearLatch         = "motion:rpc:clear-latch"
-	ChannelSoftReset          = "motion:rpc:soft-reset"
+	MethodPrepareHibernation = "prepare-hibernation"
+	MethodGetCalibration     = "get-calibration"
+	MethodClearLatch         = "clear-latch"
+	MethodSoftReset          = "soft-reset"
 )
 
 // PrepareHibernationReq names the profile alarm-service wants confirmed
@@ -52,55 +56,43 @@ type EmptyResp struct {
 	OK bool `json:"ok"`
 }
 
-// Server bundles the dependencies that handlers need + manages the
-// CallHandler lifetimes so a single Stop() tears everything down.
+// Server bundles the dependencies the handlers need and owns the
+// CallServer that dispatches requests by method.
 type Server struct {
-	ipcClient  *ipc.Client
 	controller *profile.Controller
 	accel      *bmx.Accelerometer
-	gyro       *bmx.Gyroscope
+	gyro      *bmx.Gyroscope
 	log        *slog.Logger
 
-	handlers []stopper
+	srv *ipc.CallServer
 }
 
-type stopper interface{ Stop() }
-
-// New returns a Server. Call Start to register the handlers, Stop to drain.
+// New returns a Server. Call Start to register the handlers and begin
+// processing, Stop to drain.
 func New(ipcClient *ipc.Client, controller *profile.Controller, accel *bmx.Accelerometer, gyro *bmx.Gyroscope, log *slog.Logger) *Server {
-	return &Server{
-		ipcClient:  ipcClient,
+	s := &Server{
 		controller: controller,
 		accel:      accel,
 		gyro:       gyro,
 		log:        log,
 	}
+	s.srv = ipc.NewCallServer(ipcClient, Channel)
+	ipc.RegisterCall[PrepareHibernationReq, PrepareHibernationResp](s.srv, MethodPrepareHibernation, s.prepareHibernation)
+	ipc.RegisterCall[GetCalibrationReq, CalibrationResp](s.srv, MethodGetCalibration, s.getCalibration)
+	ipc.RegisterCall[EmptyReq, EmptyResp](s.srv, MethodClearLatch, s.clearLatch)
+	ipc.RegisterCall[EmptyReq, EmptyResp](s.srv, MethodSoftReset, s.softReset)
+	return s
 }
 
-// Start registers all RPC handlers.
+// Start begins dispatching. One BRPOP loop on the per-service channel
+// regardless of method count.
 func (s *Server) Start() {
-	s.handlers = append(s.handlers,
-		ipc.HandleCalls(s.ipcClient, ChannelPrepareHibernation, s.prepareHibernation),
-		ipc.HandleCalls(s.ipcClient, ChannelGetCalibration, s.getCalibration),
-		ipc.HandleCalls(s.ipcClient, ChannelClearLatch, s.clearLatch),
-		ipc.HandleCalls(s.ipcClient, ChannelSoftReset, s.softReset),
-	)
-	s.log.Info("RPC handlers registered",
-		"channels", []string{
-			ChannelPrepareHibernation,
-			ChannelGetCalibration,
-			ChannelClearLatch,
-			ChannelSoftReset,
-		})
+	s.srv.Start()
 }
 
-// Stop drains all in-flight handler invocations and stops accepting new
-// requests.
+// Stop drains in-flight handlers and stops accepting new requests.
 func (s *Server) Stop() {
-	for _, h := range s.handlers {
-		h.Stop()
-	}
-	s.handlers = nil
+	s.srv.Stop()
 }
 
 // prepareHibernation synchronously applies the armed-hibernation profile

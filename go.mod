@@ -3,7 +3,7 @@ module github.com/librescoot/motion-service
 go 1.22.1
 
 require (
-	github.com/librescoot/redis-ipc v0.12.0
+	github.com/librescoot/redis-ipc v0.13.0
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/sys v0.29.0
 )
