@@ -1,4 +1,4 @@
-# bmx-service
+# motion-service
 
 Hardware abstraction service for the BMX055 9-axis sensor package on LibreScoot.
 
@@ -27,14 +27,14 @@ make build-amd64    # AMD64 binary
 ## Usage
 
 ```bash
-bmx-service --i2c-bus=/dev/i2c-3 --redis=localhost:6379 --polling-rate=10
+motion-service --i2c-bus=/dev/i2c-3 --redis=localhost:6379 --polling-rate=10
 ```
 
 ## Redis Interface
 
 ### Published Data
 
-**Sensor readings** (`bmx:sensors` channel, 10Hz):
+**Sensor readings** (`motion:sensors` channel, 10Hz):
 ```json
 {
   "timestamp": 1696089234567,
@@ -44,7 +44,7 @@ bmx-service --i2c-bus=/dev/i2c-3 --redis=localhost:6379 --polling-rate=10
 }
 ```
 
-**Magnetic heading** (`bmx:heading` channel, 5Hz):
+**Magnetic heading** (`motion:heading` channel, 5Hz):
 ```json
 {
   "timestamp": 1696089234567,
@@ -64,8 +64,8 @@ when the accelerometer is moving enough that it can't be trusted as a
 pure gravity vector (hard braking, big bumps); the heading then falls
 back to X/Y-only and accuracy is reported accordingly.
 
-**Interrupt events** (`bmx:interrupt` PUBSUB + `bmx:events` Stream)
-**Status** (`bmx` hash). Heading-related fields:
+**Interrupt events** (`motion:interrupt` PUBSUB + `motion:events` Stream)
+**Status** (`motion` hash). Heading-related fields:
 - `heading` (int, 0-359, legacy)
 - `heading-deg` (float, 0-360)
 - `heading-accuracy` (float, deg)
@@ -74,13 +74,13 @@ back to X/Y-only and accuracy is reported accordingly.
 
 ### Accepted Commands
 
-Via `scooter:bmx` queue:
+Via `scooter:motion` queue:
 ```bash
-LPUSH scooter:bmx sensitivity:low|medium|high
-LPUSH scooter:bmx pin:int1|int2|none
-LPUSH scooter:bmx interrupt:enable|disable
-LPUSH scooter:bmx reset
-LPUSH scooter:bmx polling:10
+LPUSH scooter:motion sensitivity:low|medium|high
+LPUSH scooter:motion pin:int1|int2|none
+LPUSH scooter:motion interrupt:enable|disable
+LPUSH scooter:motion reset
+LPUSH scooter:motion polling:10
 ```
 
 ## Sensitivity Presets
@@ -93,40 +93,40 @@ LPUSH scooter:bmx polling:10
 
 ```bash
 make build
-scp bin/bmx-service root@10.7.0.4:/usr/bin/
-ssh root@10.7.0.4 "systemctl daemon-reload && systemctl restart librescoot-bmx"
+scp bin/motion-service root@10.7.0.4:/usr/bin/
+ssh root@10.7.0.4 "systemctl daemon-reload && systemctl restart librescoot-motion"
 ```
 
 ## Magnetometer calibration capture
 
-`bmx-calibrate` is a one-shot diagnostic binary that captures raw
+`motion-calibrate` is a one-shot diagnostic binary that captures raw
 magnetometer + accelerometer + gyroscope data to a CSV in `/data/`. Use
 it to derive hard-iron and (with enough orientation coverage) soft-iron
 calibration for a particular vehicle.
 
 ```bash
 make build
-scp bin/bmx-calibrate systemd/bmx-calibrate.service root@10.7.0.4:/data/
-ssh root@10.7.0.4 'cp /data/bmx-calibrate /usr/bin/ \
-  && cp /data/bmx-calibrate.service /etc/systemd/system/ \
+scp bin/motion-calibrate systemd/motion-calibrate.service root@10.7.0.4:/data/
+ssh root@10.7.0.4 'cp /data/motion-calibrate /usr/bin/ \
+  && cp /data/motion-calibrate.service /etc/systemd/system/ \
   && systemctl daemon-reload'
 ```
 
-The unit `Conflicts=` with `librescoot-alarm` and `librescoot-bmx`, so
+The unit `Conflicts=` with `librescoot-alarm` and `librescoot-motion`, so
 starting it stops whichever is currently using the BMX055. On stop it
 brings `librescoot-alarm` back up via `systemctl --no-block start`.
 
 ```bash
 # Start a capture (alarm-service stops automatically)
-ssh deep-blue systemctl start bmx-calibrate
+ssh deep-blue systemctl start motion-calibrate
 
 # ... rotate the scooter (driving a circle works for X/Y hard-iron) ...
 
 # Stop the capture (alarm-service comes back up)
-ssh deep-blue systemctl stop bmx-calibrate
+ssh deep-blue systemctl stop motion-calibrate
 
-# Output CSV is at /data/bmx-cal-<unix-ts>.csv
-ssh deep-blue ls -lh /data/bmx-cal-\*.csv
+# Output CSV is at /data/motion-cal-<unix-ts>.csv
+ssh deep-blue ls -lh /data/motion-cal-\*.csv
 ```
 
 Live progress is logged to journald every 2 seconds:
@@ -155,11 +155,11 @@ chip's response.
 
 ```bash
 # Monitor sensor data
-redis-cli -h 10.7.0.4 SUBSCRIBE bmx:sensors
+redis-cli -h 10.7.0.4 SUBSCRIBE motion:sensors
 
 # Test motion detection
-redis-cli -h 10.7.0.4 LPUSH scooter:bmx sensitivity:medium
-redis-cli -h 10.7.0.4 LPUSH scooter:bmx interrupt:enable
-redis-cli -h 10.7.0.4 SUBSCRIBE bmx:interrupt
+redis-cli -h 10.7.0.4 LPUSH scooter:motion sensitivity:medium
+redis-cli -h 10.7.0.4 LPUSH scooter:motion interrupt:enable
+redis-cli -h 10.7.0.4 SUBSCRIBE motion:interrupt
 # Shake the scooter - should see interrupt events
 ```

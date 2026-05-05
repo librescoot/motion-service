@@ -1,4 +1,4 @@
-module bmx-service
+module github.com/librescoot/motion-service
 
 go 1.21
 

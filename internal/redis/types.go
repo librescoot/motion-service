@@ -41,7 +41,7 @@ type InterruptEvent struct {
 }
 
 // HeadingReading is the rich magnetic-heading payload published on
-// the bmx:heading channel. Consumers should weight HeadingDeg by
+// the motion:heading channel. Consumers should weight HeadingDeg by
 // AccuracyDeg (or roll their own gating using ExcessG / YawRateDPS /
 // TiltDeg) — this is the data needed to do that, not a verdict.
 type HeadingReading struct {

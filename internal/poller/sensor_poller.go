@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"bmx-service/internal/bmx"
-	"bmx-service/internal/redis"
+	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/redis"
 )
 
 // SensorPoller continuously polls sensors and publishes data
@@ -37,7 +37,7 @@ func NewSensorPoller(
 		mag:       mag,
 		publisher: publisher,
 		rateHz:    rateHz,
-		// Default on — bmx-service is the primary IMU producer in the
+		// Default on — motion-service is the primary IMU producer in the
 		// post-split architecture, and downstream consumers (the debug
 		// screen, future heading code in scootui-qt) need a continuous
 		// stream out of the box. The streaming:disable command is still

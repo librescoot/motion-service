@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"bmx-service/internal/bmx"
-	"bmx-service/internal/driver"
-	"bmx-service/internal/poller"
-	"bmx-service/internal/redis"
+	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/driver"
+	"github.com/librescoot/motion-service/internal/poller"
+	"github.com/librescoot/motion-service/internal/redis"
 )
 
 // Config holds application configuration
@@ -22,7 +22,7 @@ type Config struct {
 	Logger      *slog.Logger
 }
 
-// App represents the bmx-service application
+// App represents the motion-service application
 type App struct {
 	cfg       *Config
 	log       *slog.Logger
@@ -47,7 +47,7 @@ func New(cfg *Config) *App {
 
 // Run runs the application
 func (a *App) Run(ctx context.Context) error {
-	a.log.Info("starting bmx-service",
+	a.log.Info("starting motion-service",
 		"i2c_bus", a.cfg.I2CBus,
 		"redis_addr", a.cfg.RedisAddr,
 		"polling_rate", a.cfg.PollingRate)

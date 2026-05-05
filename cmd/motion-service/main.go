@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"bmx-service/internal/app"
+	"github.com/librescoot/motion-service/internal/app"
 )
 
 var (
@@ -25,7 +25,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		println("bmx-service")
+		println("motion-service")
 		println("  Revision:", gitRevision)
 		println("  Built:", buildTime)
 		os.Exit(0)
@@ -37,7 +37,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("bmx-service starting",
+	logger.Info("motion-service starting",
 		"revision", gitRevision,
 		"build_time", buildTime,
 		"i2c_bus", *i2cBus,
@@ -76,7 +76,7 @@ func main() {
 		}
 	}
 
-	logger.Info("bmx-service stopped")
+	logger.Info("motion-service stopped")
 }
 
 func parseLogLevel(level string) slog.Level {

@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"bmx-service/internal/bmx"
-	"bmx-service/internal/redis"
+	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/redis"
 )
 
 // InterruptPoller monitors for motion interrupts

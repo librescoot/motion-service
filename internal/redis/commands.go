@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// CommandHandler handles commands from the scooter:bmx queue
+// CommandHandler handles commands from the scooter:motion queue
 type CommandHandler struct {
 	client  *Client
 	log     *slog.Logger
@@ -33,12 +33,12 @@ func (h *CommandHandler) Run(ctx context.Context) error {
 			return nil
 
 		default:
-			cmd, err := h.client.BRPop(ctx, "scooter:bmx")
+			cmd, err := h.client.BRPop(ctx, "scooter:motion")
 			if err != nil {
 				if err == context.Canceled {
 					return nil
 				}
-				h.log.Error("error reading from scooter:bmx", "error", err)
+				h.log.Error("error reading from scooter:motion", "error", err)
 				continue
 			}
 

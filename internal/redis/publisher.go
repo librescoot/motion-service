@@ -23,14 +23,14 @@ func NewPublisher(client *Client, log *slog.Logger) *Publisher {
 	}
 }
 
-// PublishSensorData publishes sensor readings to the bmx:sensors channel
+// PublishSensorData publishes sensor readings to the motion:sensors channel
 func (p *Publisher) PublishSensorData(ctx context.Context, reading *SensorReading) error {
 	data, err := json.Marshal(reading)
 	if err != nil {
 		return fmt.Errorf("failed to marshal sensor data: %w", err)
 	}
 
-	if err := p.client.Publish(ctx, "bmx:sensors", string(data)); err != nil {
+	if err := p.client.Publish(ctx, "motion:sensors", string(data)); err != nil {
 		return fmt.Errorf("failed to publish sensor data: %w", err)
 	}
 
@@ -44,7 +44,7 @@ func (p *Publisher) PublishInterrupt(ctx context.Context, event *InterruptEvent)
 		return fmt.Errorf("failed to marshal interrupt event: %w", err)
 	}
 
-	if err := p.client.Publish(ctx, "bmx:interrupt", string(data)); err != nil {
+	if err := p.client.Publish(ctx, "motion:interrupt", string(data)); err != nil {
 		p.log.Error("failed to publish interrupt to PUBSUB", "error", err)
 	}
 
@@ -55,7 +55,7 @@ func (p *Publisher) PublishInterrupt(ctx context.Context, event *InterruptEvent)
 		"data":             string(data),
 	}
 
-	streamID, err := p.client.XAdd(ctx, "bmx:events", values)
+	streamID, err := p.client.XAdd(ctx, "motion:events", values)
 	if err != nil {
 		return fmt.Errorf("failed to add interrupt to stream: %w", err)
 	}
@@ -64,23 +64,23 @@ func (p *Publisher) PublishInterrupt(ctx context.Context, event *InterruptEvent)
 	return nil
 }
 
-// PublishStatus publishes status information to the bmx hash
+// PublishStatus publishes status information to the motion hash
 func (p *Publisher) PublishStatus(ctx context.Context, status map[string]string) error {
 	values := make(map[string]interface{})
 	for k, v := range status {
 		values[k] = v
 	}
 
-	if err := p.client.HSetMultiple(ctx, "bmx", values); err != nil {
+	if err := p.client.HSetMultiple(ctx, "motion", values); err != nil {
 		return fmt.Errorf("failed to publish status: %w", err)
 	}
 
 	return nil
 }
 
-// UpdateStatusField updates a single field in the bmx hash
+// UpdateStatusField updates a single field in the motion hash
 func (p *Publisher) UpdateStatusField(ctx context.Context, field string, value string) error {
-	if err := p.client.HSet(ctx, "bmx", field, value); err != nil {
+	if err := p.client.HSet(ctx, "motion", field, value); err != nil {
 		return fmt.Errorf("failed to update status field %s: %w", field, err)
 	}
 	return nil
@@ -98,7 +98,7 @@ func (p *Publisher) IncrementErrorCount(ctx context.Context, errorMsg string) er
 		return err
 	}
 
-	countStr, err := p.client.HGet(ctx, "bmx", "error-count")
+	countStr, err := p.client.HGet(ctx, "motion", "error-count")
 	if err != nil {
 		countStr = "0"
 	}
@@ -112,7 +112,7 @@ func (p *Publisher) IncrementErrorCount(ctx context.Context, errorMsg string) er
 
 
 // PublishHeading publishes a tilt-compensated heading reading on the
-// bmx:heading PUBSUB channel (JSON) and updates the bmx hash with both the
+// motion:heading PUBSUB channel (JSON) and updates the motion hash with both the
 // fractional heading and the legacy integer "heading" field, plus the
 // quality fields a consumer needs to gate on.
 func (p *Publisher) PublishHeading(ctx context.Context, reading *HeadingReading) error {
@@ -121,7 +121,7 @@ func (p *Publisher) PublishHeading(ctx context.Context, reading *HeadingReading)
 		return fmt.Errorf("failed to marshal heading: %w", err)
 	}
 
-	if err := p.client.Publish(ctx, "bmx:heading", string(data)); err != nil {
+	if err := p.client.Publish(ctx, "motion:heading", string(data)); err != nil {
 		return fmt.Errorf("failed to publish heading: %w", err)
 	}
 
@@ -132,7 +132,7 @@ func (p *Publisher) PublishHeading(ctx context.Context, reading *HeadingReading)
 		"heading-tilt":     fmt.Sprintf("%.2f", reading.TiltDeg),
 		"heading-tilt-comp": map[bool]string{true: "true", false: "false"}[reading.TiltCompensated],
 	}
-	if err := p.client.HSetMultiple(ctx, "bmx", hash); err != nil {
+	if err := p.client.HSetMultiple(ctx, "motion", hash); err != nil {
 		return fmt.Errorf("failed to update heading hash: %w", err)
 	}
 	return nil

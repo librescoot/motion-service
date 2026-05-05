@@ -1,15 +1,18 @@
 [Unit]
 Description=BMX055 calibration data capture
-Documentation=https://github.com/librescoot/bmx-service
+Documentation=https://github.com/librescoot/motion-service
 # Take exclusive ownership of the BMX055. Conflicts= stops these units when
-# bmx-calibrate starts; After= ensures we wait for them to release the I2C
-# bus before we initialize the chip.
-Conflicts=librescoot-alarm.service librescoot-bmx.service
-After=librescoot-alarm.service librescoot-bmx.service
+# motion-calibrate starts; After= ensures we wait for them to release the
+# I2C bus before we initialize the chip. librescoot-alarm.service is in the
+# list while alarm-service still owns the chip directly; once Phase 4 of
+# the motion-service refactor lands, alarm-service will be a pure consumer
+# and only librescoot-motion needs to stop here.
+Conflicts=librescoot-alarm.service librescoot-motion.service
+After=librescoot-alarm.service librescoot-motion.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/bmx-calibrate \
+ExecStart=/usr/bin/motion-calibrate \
     --i2c-bus=/dev/i2c-3 \
     --rate=20 \
     --preset=highacc \
@@ -27,4 +30,4 @@ StandardError=journal
 Restart=no
 
 # No [Install] section by design — this is a manually-triggered diagnostic
-# unit. Use `systemctl start bmx-calibrate.service` directly.
+# unit. Use `systemctl start motion-calibrate.service` directly.

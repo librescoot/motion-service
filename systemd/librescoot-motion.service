@@ -1,11 +1,11 @@
 [Unit]
-Description=BMX055 Sensor Service
+Description=LibreScoot Motion Service (BMX055 IMU)
 After=network.target redis.service
 Wants=redis.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/bmx-service \
+ExecStart=/usr/bin/motion-service \
     --i2c-bus=/dev/i2c-3 \
     --redis=localhost:6379 \
     --polling-rate=10 \

@@ -31,8 +31,8 @@ import (
 	"syscall"
 	"time"
 
-	"bmx-service/internal/bmx"
-	"bmx-service/internal/driver"
+	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/driver"
 )
 
 func main() {

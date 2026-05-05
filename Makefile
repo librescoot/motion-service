@@ -1,14 +1,14 @@
 .PHONY: build build-service build-calibrate build-arm build-amd64 clean lint test run dev-build build-native
 
-BINARY_NAME=bmx-service
-CAL_BINARY_NAME=bmx-calibrate
+BINARY_NAME=motion-service
+CAL_BINARY_NAME=motion-calibrate
 BUILD_DIR=bin
 GIT_REVISION=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=$(shell git diff --quiet || echo "-dirty")
 VERSION_FLAGS=-X main.gitRevision=$(GIT_REVISION)$(GIT_DIRTY) -X main.buildTime=$(shell date -u +%Y%m%d-%H%M%S)
 LDFLAGS=-ldflags "-w -s -extldflags '-static' $(VERSION_FLAGS)"
-CMD_DIR=cmd/bmx-service
-CAL_CMD_DIR=cmd/bmx-calibrate
+CMD_DIR=cmd/motion-service
+CAL_CMD_DIR=cmd/motion-calibrate
 
 build: build-service build-calibrate
 

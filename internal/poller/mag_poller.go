@@ -6,8 +6,8 @@ import (
 	"math"
 	"time"
 
-	"bmx-service/internal/bmx"
-	"bmx-service/internal/redis"
+	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/redis"
 )
 
 const (
@@ -180,8 +180,8 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		p.pollCount = 0
 	}
 
-	// Magnetometer values are already in the bmx:sensors payload at 10 Hz —
-	// we don't need a separate bmx:magnetometer channel just for the same
+	// Magnetometer values are already in the motion:sensors payload at 10 Hz —
+	// we don't need a separate motion:magnetometer channel just for the same
 	// data at half the rate. Suppresses ~750 B/s of redundant pub/sub
 	// traffic over the USB-ethernet link to the DBC.
 
