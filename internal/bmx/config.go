@@ -7,6 +7,7 @@ const (
 	InterruptPinNone InterruptPin = iota
 	InterruptPinINT1
 	InterruptPinINT2
+	InterruptPinBoth
 )
 
 func (p InterruptPin) String() string {
@@ -17,6 +18,8 @@ func (p InterruptPin) String() string {
 		return "int1"
 	case InterruptPinINT2:
 		return "int2"
+	case InterruptPinBoth:
+		return "both"
 	default:
 		return "unknown"
 	}
@@ -29,11 +32,49 @@ func ParseInterruptPin(s string) InterruptPin {
 		return InterruptPinINT1
 	case "int2":
 		return InterruptPinINT2
+	case "both":
+		return InterruptPinBoth
 	case "none":
 		return InterruptPinNone
 	default:
 		return InterruptPinNone
 	}
+}
+
+// InterruptMode selects which BMX055 interrupt engine to use.
+type InterruptMode int
+
+const (
+	// InterruptModeAnyMotion uses the slope/any-motion engine (register 0x16).
+	// Fires when |accel[n] - accel[n-2]| exceeds threshold for N consecutive
+	// samples. Responsive to brief impacts — suitable for awake-armed
+	// alertness detection.
+	InterruptModeAnyMotion InterruptMode = iota
+
+	// InterruptModeSlowMotion uses the slow-motion engine (register 0x18).
+	// Fires when the slope exceeds threshold for N consecutive samples.
+	// Requires sustained movement — suitable for confirming deliberate
+	// manipulation in L1 / waiting states.
+	InterruptModeSlowMotion
+)
+
+func (m InterruptMode) String() string {
+	switch m {
+	case InterruptModeAnyMotion:
+		return "any-motion"
+	case InterruptModeSlowMotion:
+		return "slow-motion"
+	default:
+		return "unknown"
+	}
+}
+
+// SensorConfig is the full hardware configuration for a detection profile.
+type SensorConfig struct {
+	Mode      InterruptMode
+	Bandwidth byte // PMU_BW register value
+	Threshold byte // 1 LSB = 3.91 mg in 2g range
+	Duration  byte // N = dur+1 consecutive samples must exceed threshold
 }
 
 // Sensitivity represents motion detection sensitivity levels

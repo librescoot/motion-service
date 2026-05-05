@@ -77,12 +77,40 @@ const (
 	ACCEL_INT_EN_SLOW_NO_MOTION_Z   = 0x04
 	ACCEL_INT_EN_SLOW_NO_MOTION_SEL = 0x08
 	ACCEL_INT_STATUS_SLOW_NO_MOT    = 0x08
+
+	// Slope (any-motion) engine — register INT_EN_0 (0x16)
+	ACCEL_INT_EN_SLOPE_X = 0x01
+	ACCEL_INT_EN_SLOPE_Y = 0x02
+	ACCEL_INT_EN_SLOPE_Z = 0x04
+
+	ACCEL_INT_STATUS_SLOPE = 0x04 // INT_STATUS_0 bit
 )
 
 // Accelerometer interrupt mapping
 const (
 	ACCEL_INT1_MAP_SLOW_NO_MOTION = 0x08
 	ACCEL_INT2_MAP_SLOW_NO_MOTION = 0x08
+	ACCEL_INT1_MAP_SLOPE          = 0x04
+	ACCEL_INT2_MAP_SLOPE          = 0x04
+)
+
+// Slope-engine duration/threshold registers
+const (
+	ACCEL_SLOPE_DURATION  = 0x27 // bits[1:0] — shared with slo_no_mot_dur in bits[7:2]
+	ACCEL_SLOPE_THRESHOLD = 0x28 // 1 LSB = 3.91 mg in 2g range
+)
+
+// Accelerometer bandwidth values for PMU_BW (0x10).
+// ODR = 2 * BW. Power-on default is 1000 Hz; must be set explicitly after every soft reset.
+const (
+	ACCEL_BW_7_81HZ  = 0x08 // 7.81 Hz, sample period 64 ms
+	ACCEL_BW_15_63HZ = 0x09 // 15.63 Hz, sample period 32 ms
+	ACCEL_BW_31_25HZ = 0x0A // 31.25 Hz, sample period 16 ms
+	ACCEL_BW_62_5HZ  = 0x0B // 62.5 Hz, sample period 8 ms
+	ACCEL_BW_125HZ   = 0x0C
+	ACCEL_BW_250HZ   = 0x0D
+	ACCEL_BW_500HZ   = 0x0E
+	ACCEL_BW_1000HZ  = 0x0F
 )
 
 // Interrupt latch modes

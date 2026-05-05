@@ -17,27 +17,14 @@ type SensorReading struct {
 	Mag       *SensorAxis `json:"mag,omitempty"`
 }
 
-// InterruptConfig represents the interrupt configuration at time of interrupt
-type InterruptConfig struct {
-	Threshold   string `json:"threshold"`
-	Duration    string `json:"duration"`
-	Sensitivity string `json:"sensitivity"`
-}
-
-// SensorValues represents sensor values at time of interrupt
-type SensorValues struct {
-	Accel SensorAxis `json:"accel"`
-	Gyro  SensorAxis `json:"gyro"`
-}
-
-// InterruptEvent represents a motion interrupt event
-type InterruptEvent struct {
-	ID              string          `json:"id"`
-	Timestamp       int64           `json:"timestamp"`
-	Type            string          `json:"type"`
-	InterruptStatus string          `json:"interrupt_status"`
-	SensorValues    SensorValues    `json:"sensor_values"`
-	Config          InterruptConfig `json:"config"`
+// MotionEvent is the lightweight alarm-facing envelope published on
+// motion:interrupt. Consumers (alarm-service primarily) feed Type into
+// their FSM and use Engine to disambiguate any-motion vs slow-motion
+// without reading the chip themselves.
+type MotionEvent struct {
+	Type      string `json:"type"`             // "edge" | "wake-hibernation"
+	Timestamp int64  `json:"timestamp"`
+	Engine    string `json:"engine,omitempty"` // "any-motion" | "slow-motion" | ""
 }
 
 // HeadingReading is the rich magnetic-heading payload published on

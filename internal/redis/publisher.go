@@ -37,30 +37,27 @@ func (p *Publisher) PublishSensorData(ctx context.Context, reading *SensorReadin
 	return nil
 }
 
-// PublishInterrupt publishes an interrupt event to both PUBSUB and Stream
-func (p *Publisher) PublishInterrupt(ctx context.Context, event *InterruptEvent) error {
+// PublishMotionEvent publishes a slim envelope on the motion:interrupt
+// channel. This is the consumer-facing interface for alarm-service and
+// any other motion-event subscriber.
+func (p *Publisher) PublishMotionEvent(ctx context.Context, event *MotionEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("failed to marshal interrupt event: %w", err)
+		return fmt.Errorf("failed to marshal motion event: %w", err)
 	}
-
 	if err := p.client.Publish(ctx, "motion:interrupt", string(data)); err != nil {
-		p.log.Error("failed to publish interrupt to PUBSUB", "error", err)
+		return fmt.Errorf("failed to publish motion event: %w", err)
 	}
+	return nil
+}
 
-	values := map[string]interface{}{
-		"timestamp":        event.Timestamp,
-		"type":             event.Type,
-		"interrupt_status": event.InterruptStatus,
-		"data":             string(data),
+// PublishReady fires once at startup after the first profile has been
+// programmed. Observability + lets consumers know the chip is in a
+// known state.
+func (p *Publisher) PublishReady(ctx context.Context) error {
+	if err := p.client.Publish(ctx, "motion:ready", fmt.Sprintf("%d", time.Now().UnixMilli())); err != nil {
+		return fmt.Errorf("failed to publish ready: %w", err)
 	}
-
-	streamID, err := p.client.XAdd(ctx, "motion:events", values)
-	if err != nil {
-		return fmt.Errorf("failed to add interrupt to stream: %w", err)
-	}
-
-	p.log.Debug("published interrupt event", "stream_id", streamID)
 	return nil
 }
 

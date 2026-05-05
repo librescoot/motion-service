@@ -4,70 +4,51 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/librescoot/motion-service/internal/bmx"
 	"github.com/librescoot/motion-service/internal/redis"
 )
 
-// InterruptPoller monitors for motion interrupts
+// InterruptPoller is the I2C-status watchdog: at a slow tick (100 ms), it
+// reads INT_STATUS_0 and emits a MotionEvent if either the slope or
+// slow-no-motion engine has fired. Pairs with InterruptWatcher (evdev fast
+// path) — the watcher gets there first when the kernel notices the GPIO
+// edge; the poller catches anything the watcher missed.
 type InterruptPoller struct {
-	accel      *bmx.Accelerometer
-	gyro       *bmx.Gyroscope
-	publisher  *redis.Publisher
-	log        *slog.Logger
-	config     InterruptConfig
-	enabled    bool
+	accel     *bmx.Accelerometer
+	publisher *redis.Publisher
+	log       *slog.Logger
+	enabled   atomic.Bool
 }
 
-// InterruptConfig holds current interrupt configuration
-type InterruptConfig struct {
-	Threshold   byte
-	Duration    byte
-	Sensitivity string
-}
-
-// NewInterruptPoller creates a new InterruptPoller
+// NewInterruptPoller creates a new InterruptPoller.
 func NewInterruptPoller(
 	accel *bmx.Accelerometer,
-	gyro *bmx.Gyroscope,
 	publisher *redis.Publisher,
 	log *slog.Logger,
 ) *InterruptPoller {
 	return &InterruptPoller{
 		accel:     accel,
-		gyro:      gyro,
 		publisher: publisher,
 		log:       log,
-		config: InterruptConfig{
-			Threshold:   0x00,
-			Duration:    0x00,
-			Sensitivity: "none",
-		},
-		enabled: false,
 	}
 }
 
-// SetConfig updates the interrupt configuration
-func (p *InterruptPoller) SetConfig(threshold, duration byte, sensitivity string) {
-	p.config.Threshold = threshold
-	p.config.Duration = duration
-	p.config.Sensitivity = sensitivity
-}
-
-// Enable enables interrupt monitoring
+// Enable arms the poller. Events that arrive while disabled are dropped.
 func (p *InterruptPoller) Enable() {
-	p.enabled = true
-	p.log.Info("interrupt monitoring enabled")
+	p.enabled.Store(true)
+	p.log.Info("interrupt poller enabled")
 }
 
-// Disable disables interrupt monitoring
+// Disable stops the poller from publishing events.
 func (p *InterruptPoller) Disable() {
-	p.enabled = false
-	p.log.Info("interrupt monitoring disabled")
+	p.enabled.Store(false)
+	p.log.Info("interrupt poller disabled")
 }
 
-// Run starts the interrupt polling loop
+// Run polls until ctx is cancelled.
 func (p *InterruptPoller) Run(ctx context.Context) {
 	p.log.Info("starting interrupt poller")
 
@@ -79,69 +60,41 @@ func (p *InterruptPoller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			p.log.Info("interrupt poller stopped")
 			return
-
 		case <-ticker.C:
-			if p.enabled {
-				if err := p.checkInterrupt(ctx); err != nil {
-					p.log.Error("failed to check interrupt", "error", err)
-				}
+			if !p.enabled.Load() {
+				continue
+			}
+			if err := p.checkInterrupt(ctx); err != nil {
+				p.log.Error("failed to check interrupt", "error", err)
 			}
 		}
 	}
 }
 
-// checkInterrupt checks if an interrupt has occurred
+// checkInterrupt reads INT_STATUS_0, decides which engine fired, and
+// publishes a MotionEvent. Clears the latch afterwards.
 func (p *InterruptPoller) checkInterrupt(ctx context.Context) error {
-	triggered, err := p.accel.GetInterruptStatus()
+	status, err := p.accel.ReadByteData(bmx.ACCEL_INT_STATUS_0)
 	if err != nil {
-		return err
+		return fmt.Errorf("read INT_STATUS_0: %w", err)
 	}
 
-	if !triggered {
+	slope := (status & bmx.ACCEL_INT_STATUS_SLOPE) != 0
+	slow := (status & bmx.ACCEL_INT_STATUS_SLOW_NO_MOT) != 0
+	if !slope && !slow {
 		return nil
 	}
 
-	p.log.Info("motion interrupt detected")
+	engine := engineNameFor(slope, slow)
+	ts := time.Now().UnixMilli()
+	p.log.Info("motion interrupt detected", "engine", engine, "timestamp", ts)
 
-	accelX, accelY, accelZ, accelMag, err := p.accel.ReadDataInG()
-	if err != nil {
-		return err
-	}
-
-	gyroX, gyroY, gyroZ, gyroMag, err := p.gyro.ReadDataInDPS()
-	if err != nil {
-		return err
-	}
-
-	event := &redis.InterruptEvent{
-		Timestamp:       time.Now().UnixMilli(),
-		Type:            "slow_motion",
-		InterruptStatus: "0x08",
-		SensorValues: redis.SensorValues{
-			Accel: redis.SensorAxis{
-				X:         accelX,
-				Y:         accelY,
-				Z:         accelZ,
-				Magnitude: accelMag,
-				Unit:      "g",
-			},
-			Gyro: redis.SensorAxis{
-				X:         gyroX,
-				Y:         gyroY,
-				Z:         gyroZ,
-				Magnitude: gyroMag,
-				Unit:      "deg/s",
-			},
-		},
-		Config: redis.InterruptConfig{
-			Threshold:   fmt.Sprintf("0x%02X", p.config.Threshold),
-			Duration:    fmt.Sprintf("0x%02X", p.config.Duration),
-			Sensitivity: p.config.Sensitivity,
-		},
-	}
-
-	if err := p.publisher.PublishInterrupt(ctx, event); err != nil {
-		return err
+	if err := p.publisher.PublishMotionEvent(ctx, &redis.MotionEvent{
+		Type:      "edge",
+		Timestamp: ts,
+		Engine:    engine,
+	}); err != nil {
+		p.log.Error("failed to publish motion event", "error", err)
 	}
 
 	if err := p.publisher.UpdateLastInterruptTime(ctx); err != nil {
@@ -149,8 +102,21 @@ func (p *InterruptPoller) checkInterrupt(ctx context.Context) error {
 	}
 
 	if err := p.accel.ClearLatchedInterrupt(); err != nil {
-		return fmt.Errorf("failed to clear latched interrupt: %w", err)
+		return fmt.Errorf("clear latched interrupt: %w", err)
 	}
 
 	return nil
+}
+
+// engineNameFor returns the canonical engine string. If both bits are set
+// (a quick re-fire across the read window), prefer slope as it's the more
+// responsive engine.
+func engineNameFor(slope, slow bool) string {
+	if slope {
+		return "any-motion"
+	}
+	if slow {
+		return "slow-motion"
+	}
+	return ""
 }

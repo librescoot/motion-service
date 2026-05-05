@@ -108,13 +108,22 @@ func (a *Accelerometer) ReadDataInGVehicleFrame(o Orientation) (vx, vy, vz, magn
 	return vx, vy, vz, magnitude, nil
 }
 
-// ConfigureSlowNoMotion configures slow/no-motion detection
+// ConfigureSlowNoMotion configures slow/no-motion detection.
+// Register 0x27 is shared: slo_no_mot_dur occupies bits[7:2], slope_dur
+// occupies bits[1:0]. The duration parameter is the logical slo_no_mot_dur
+// value (0-63) and is shifted into bits[7:2]; bits[1:0] (slope_dur) are
+// preserved via read-modify-write so the any-motion engine isn't disturbed.
 func (a *Accelerometer) ConfigureSlowNoMotion(threshold, duration byte) error {
 	if err := a.WriteByteData(ACCEL_SLO_NO_MOT_THRESHOLD, threshold); err != nil {
 		return fmt.Errorf("failed to set slow/no-motion threshold: %w", err)
 	}
 
-	if err := a.WriteByteData(ACCEL_SLO_NO_MOT_DURATION, duration); err != nil {
+	existing, err := a.ReadByteData(ACCEL_SLO_NO_MOT_DURATION)
+	if err != nil {
+		return fmt.Errorf("failed to read duration register: %w", err)
+	}
+	val := (existing & 0x03) | (duration << 2)
+	if err := a.WriteByteData(ACCEL_SLO_NO_MOT_DURATION, val); err != nil {
 		return fmt.Errorf("failed to set slow/no-motion duration: %w", err)
 	}
 
@@ -210,10 +219,146 @@ func (a *Accelerometer) GetInterruptStatus() (bool, error) {
 	return (status & ACCEL_INT_STATUS_SLOW_NO_MOT) != 0, nil
 }
 
-// ClearLatchedInterrupt clears a latched interrupt
+// ClearLatchedInterrupt clears a latched interrupt while preserving latch
+// mode. Register 0x21 holds reset_int (bit 7, write-only) and latch_int
+// (bits 3:0). Writing 0x80 alone would zero latch_int, dropping the chip
+// into non-latched mode — subsequent edges would auto-clear before the
+// poller could see them.
 func (a *Accelerometer) ClearLatchedInterrupt() error {
-	if err := a.WriteByteData(ACCEL_INT_RST_LATCH, 0x80); err != nil {
+	if err := a.WriteByteData(ACCEL_INT_RST_LATCH, 0x80|ACCEL_INT_LATCHED); err != nil {
 		return fmt.Errorf("failed to clear latched interrupt: %w", err)
+	}
+	return nil
+}
+
+// ConfigureInterruptPins configures one or both interrupt pins (active-high,
+// push-pull) and the chip-wide latch mode.
+func (a *Accelerometer) ConfigureInterruptPins(pin InterruptPin, latched bool) error {
+	outCtrl, err := a.ReadByteData(ACCEL_INT_OUT_CTRL)
+	if err != nil {
+		return fmt.Errorf("failed to read interrupt output control: %w", err)
+	}
+
+	if pin == InterruptPinINT1 || pin == InterruptPinBoth {
+		outCtrl |= ACCEL_INT1_ACTIVE_HIGH
+		outCtrl &^= ACCEL_INT1_OPEN_DRAIN
+	}
+	if pin == InterruptPinINT2 || pin == InterruptPinBoth {
+		outCtrl |= ACCEL_INT2_ACTIVE_HIGH
+		outCtrl &^= ACCEL_INT2_OPEN_DRAIN
+	}
+
+	if err := a.WriteByteData(ACCEL_INT_OUT_CTRL, outCtrl); err != nil {
+		return fmt.Errorf("failed to write interrupt output control: %w", err)
+	}
+
+	latchMode := byte(ACCEL_INT_NON_LATCHED)
+	if latched {
+		latchMode = byte(ACCEL_INT_LATCHED)
+	}
+	if err := a.WriteByteData(ACCEL_INT_LATCH, latchMode); err != nil {
+		return fmt.Errorf("failed to write interrupt latch: %w", err)
+	}
+	return nil
+}
+
+// MapInterruptToPins maps the slow/no-motion interrupt to one or both pins.
+func (a *Accelerometer) MapInterruptToPins(pin InterruptPin) error {
+	if pin == InterruptPinINT1 || pin == InterruptPinBoth {
+		if err := a.WriteByteData(ACCEL_INT_MAP_0, ACCEL_INT1_MAP_SLOW_NO_MOTION); err != nil {
+			return fmt.Errorf("failed to map slow-motion to INT1: %w", err)
+		}
+	}
+	if pin == InterruptPinINT2 || pin == InterruptPinBoth {
+		if err := a.WriteByteData(ACCEL_INT_MAP_2, ACCEL_INT2_MAP_SLOW_NO_MOTION); err != nil {
+			return fmt.Errorf("failed to map slow-motion to INT2: %w", err)
+		}
+	}
+	return nil
+}
+
+// EnableAnyMotionInterrupt enables the slope/any-motion engine on all axes.
+// duration writes bits[1:0] of register 0x27 (shared with slo_no_mot_dur in
+// bits[7:2]); existing slo_no_mot_dur bits are preserved.
+func (a *Accelerometer) EnableAnyMotionInterrupt(threshold, duration byte) error {
+	existing, err := a.ReadByteData(ACCEL_SLOPE_DURATION)
+	if err != nil {
+		return fmt.Errorf("failed to read slope duration register: %w", err)
+	}
+	val := (existing &^ 0x03) | (duration & 0x03)
+	if err := a.WriteByteData(ACCEL_SLOPE_DURATION, val); err != nil {
+		return fmt.Errorf("failed to set slope duration: %w", err)
+	}
+	if err := a.WriteByteData(ACCEL_SLOPE_THRESHOLD, threshold); err != nil {
+		return fmt.Errorf("failed to set slope threshold: %w", err)
+	}
+	intEn := byte(ACCEL_INT_EN_SLOPE_X | ACCEL_INT_EN_SLOPE_Y | ACCEL_INT_EN_SLOPE_Z)
+	if err := a.WriteByteData(ACCEL_INT_EN_0, intEn); err != nil {
+		return fmt.Errorf("failed to enable any-motion interrupt: %w", err)
+	}
+	return nil
+}
+
+// DisableAnyMotionInterrupt disables the slope/any-motion engine.
+func (a *Accelerometer) DisableAnyMotionInterrupt() error {
+	if err := a.WriteByteData(ACCEL_INT_EN_0, 0x00); err != nil {
+		return fmt.Errorf("failed to disable any-motion interrupt: %w", err)
+	}
+	return nil
+}
+
+// MapAnyMotionToPins maps the slope/any-motion interrupt to the specified
+// pins. OR'd into the existing INT_MAP_0/INT_MAP_2 contents so it doesn't
+// clobber a slow-motion mapping configured separately.
+func (a *Accelerometer) MapAnyMotionToPins(pin InterruptPin) error {
+	if pin == InterruptPinINT1 || pin == InterruptPinBoth {
+		existing, err := a.ReadByteData(ACCEL_INT_MAP_0)
+		if err != nil {
+			return fmt.Errorf("failed to read INT_MAP_0: %w", err)
+		}
+		if err := a.WriteByteData(ACCEL_INT_MAP_0, existing|ACCEL_INT1_MAP_SLOPE); err != nil {
+			return fmt.Errorf("failed to map any-motion to INT1: %w", err)
+		}
+	}
+	if pin == InterruptPinINT2 || pin == InterruptPinBoth {
+		existing, err := a.ReadByteData(ACCEL_INT_MAP_2)
+		if err != nil {
+			return fmt.Errorf("failed to read INT_MAP_2: %w", err)
+		}
+		if err := a.WriteByteData(ACCEL_INT_MAP_2, existing|ACCEL_INT2_MAP_SLOPE); err != nil {
+			return fmt.Errorf("failed to map any-motion to INT2: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetAnyMotionInterruptStatus reads INT_STATUS_0 and returns true if the
+// slope/any-motion bit is set.
+func (a *Accelerometer) GetAnyMotionInterruptStatus() (bool, error) {
+	status, err := a.ReadByteData(ACCEL_INT_STATUS_0)
+	if err != nil {
+		return false, fmt.Errorf("failed to read interrupt status: %w", err)
+	}
+	return (status & ACCEL_INT_STATUS_SLOPE) != 0, nil
+}
+
+// GetMotionInterruptStatus returns true if either the slope/any-motion or
+// the slow/no-motion bit is set in INT_STATUS_0. Use this in the poller so
+// it works regardless of which engine is currently active.
+func (a *Accelerometer) GetMotionInterruptStatus() (bool, error) {
+	status, err := a.ReadByteData(ACCEL_INT_STATUS_0)
+	if err != nil {
+		return false, fmt.Errorf("failed to read interrupt status: %w", err)
+	}
+	return (status & (ACCEL_INT_STATUS_SLOPE | ACCEL_INT_STATUS_SLOW_NO_MOT)) != 0, nil
+}
+
+// SetBandwidth sets the accelerometer low-pass filter bandwidth (PMU_BW
+// 0x10). ODR = 2 * BW. Power-on default is 1000 Hz; must be set explicitly
+// after every soft reset.
+func (a *Accelerometer) SetBandwidth(bw byte) error {
+	if err := a.WriteByteData(ACCEL_PMU_BW, bw); err != nil {
+		return fmt.Errorf("failed to set bandwidth: %w", err)
 	}
 	return nil
 }

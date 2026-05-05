@@ -8,18 +8,24 @@ import (
 	"strings"
 	"time"
 
+	ipc "github.com/librescoot/redis-ipc"
+
 	"github.com/librescoot/motion-service/internal/bmx"
 	"github.com/librescoot/motion-service/internal/driver"
 	"github.com/librescoot/motion-service/internal/poller"
+	"github.com/librescoot/motion-service/internal/profile"
 	"github.com/librescoot/motion-service/internal/redis"
+	rpcpkg "github.com/librescoot/motion-service/internal/rpc"
 )
 
 // Config holds application configuration
 type Config struct {
-	I2CBus      string
-	RedisAddr   string
-	PollingRate int
-	Logger      *slog.Logger
+	I2CBus       string
+	RedisAddr    string
+	PollingRate  int
+	EvdevDevice  string
+	EvdevKeycode uint16
+	Logger       *slog.Logger
 }
 
 // App represents the motion-service application
@@ -27,14 +33,20 @@ type App struct {
 	cfg       *Config
 	log       *slog.Logger
 	redis     *redis.Client
+	ipcClient *ipc.Client
 	publisher *redis.Publisher
 	accel     *bmx.Accelerometer
 	gyro      *bmx.Gyroscope
 	mag       *bmx.Magnetometer
 
-	sensorPoller    *poller.SensorPoller
-	interruptPoller *poller.InterruptPoller
-	magPoller       *poller.MagPoller
+	sensorPoller     *poller.SensorPoller
+	interruptPoller  *poller.InterruptPoller
+	interruptWatcher *poller.InterruptWatcher
+	magPoller        *poller.MagPoller
+
+	controller *profile.Controller
+	subscriber *redis.Subscriber
+	rpcServer  *rpcpkg.Server
 }
 
 // New creates a new App
@@ -73,25 +85,115 @@ func (a *App) Run(ctx context.Context) error {
 		a.log.Warn("failed to publish initial status", "error", err)
 	}
 
+	// Sensor + magnetometer telemetry pollers run unconditionally —
+	// they're independent of the alarm-driven interrupt path.
 	a.sensorPoller = poller.NewSensorPoller(
 		a.accel, a.gyro, a.mag, a.publisher, a.cfg.PollingRate, a.log)
 	go a.sensorPoller.Run(ctx)
-
-	a.interruptPoller = poller.NewInterruptPoller(
-		a.accel, a.gyro, a.publisher, a.log)
-	go a.interruptPoller.Run(ctx)
 
 	if a.mag != nil {
 		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, a.log)
 		go a.magPoller.Run(ctx)
 	}
 
+	// Interrupt poller (I2C-status watchdog) and watcher (evdev fast path).
+	// Both start disabled; the profile controller arms them when a profile
+	// that uses interrupts is applied.
+	a.interruptPoller = poller.NewInterruptPoller(a.accel, a.publisher, a.log)
+	go a.interruptPoller.Run(ctx)
+
+	var watcherSource profile.InterruptSource
+	if a.cfg.EvdevDevice != "" {
+		w := poller.NewInterruptWatcher(a.cfg.EvdevDevice, a.cfg.EvdevKeycode, a.accel, a.publisher, a.log)
+		if err := w.Open(); err != nil {
+			a.log.Warn("evdev watcher unavailable, falling back to I2C poller only", "error", err)
+		} else {
+			a.interruptWatcher = w
+			watcherSource = w
+			go w.Run(ctx)
+		}
+	}
+
+	// Wake-cause detection: if the chip already has a latched interrupt at
+	// startup, we likely came up from hibernation due to a motion edge.
+	// Read INT_STATUS_0 BEFORE the controller's first Apply (which soft-
+	// resets and clears the latch).
+	wakeFromHibernation := false
+	if status, err := a.accel.ReadByteData(bmx.ACCEL_INT_STATUS_0); err == nil {
+		if (status & (bmx.ACCEL_INT_STATUS_SLOPE | bmx.ACCEL_INT_STATUS_SLOW_NO_MOT)) != 0 {
+			wakeFromHibernation = true
+			a.log.Info("startup latched interrupt detected — wake-from-hibernation",
+				"int_status_0", fmt.Sprintf("0x%02X", status))
+		}
+	}
+
+	// Profile controller — owns chip configuration. Apply Idle so the chip
+	// is in a known state before subscribers can drive it.
+	a.controller = profile.New(a.accel, a.gyro, a.interruptPoller, watcherSource, a.publisher, a.log)
+	if err := a.controller.Apply(ctx, profile.Idle); err != nil {
+		return fmt.Errorf("apply initial idle profile: %w", err)
+	}
+
+	// If we woke from a hibernation motion, emit the sentinel event so
+	// alarm-service can branch its FSM on it. Doing this AFTER the chip
+	// has been put into Idle state so consumers see a chip in a known
+	// configuration when they react.
+	if wakeFromHibernation {
+		if err := a.publisher.PublishMotionEvent(ctx, &redis.MotionEvent{
+			Type:      "wake-hibernation",
+			Timestamp: time.Now().UnixMilli(),
+		}); err != nil {
+			a.log.Warn("publish wake-hibernation failed", "error", err)
+		}
+	}
+
+	// Connect a redis-ipc client (parallel to the existing legacy client)
+	// for HashWatcher + HandleCalls. Both connect to the same Redis.
+	host, port := splitHostPort(a.cfg.RedisAddr)
+	ipcClient, err := ipc.New(ipc.WithAddress(host), ipc.WithPort(port), ipc.WithLogger(a.log))
+	if err != nil {
+		return fmt.Errorf("ipc client: %w", err)
+	}
+	a.ipcClient = ipcClient
+	defer ipcClient.Close()
+
+	// Subscribe to the alarm hash + power-manager hash. StartWithSync issues
+	// HGETALL on each so the very first apply reflects current vehicle state.
+	a.subscriber = redis.NewSubscriber(a.ipcClient, a.controller, a.log)
+	if err := a.subscriber.Start(); err != nil {
+		return fmt.Errorf("start subscribers: %w", err)
+	}
+	defer a.subscriber.Stop()
+
+	// Register RPC handlers (prepare-hibernation, get-calibration, ...)
+	a.rpcServer = rpcpkg.New(a.ipcClient, a.controller, a.accel, a.gyro, a.log)
+	a.rpcServer.Start()
+	defer a.rpcServer.Stop()
+
+	if err := a.publisher.PublishReady(ctx); err != nil {
+		a.log.Warn("publish ready failed", "error", err)
+	}
+
+	// Legacy scooter:motion command queue — kept for now so manual dev
+	// commands keep working. Will be retired when nothing pushes to it.
 	cmdHandler := redis.NewCommandHandler(a.redis, a.log, a.handleCommand)
 	go cmdHandler.Run(ctx)
 
 	<-ctx.Done()
 	a.log.Info("shutting down")
 	return nil
+}
+
+// splitHostPort splits "host:port" with a sensible default port if absent.
+func splitHostPort(addr string) (string, int) {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		host := addr[:i]
+		if port, err := strconv.Atoi(addr[i+1:]); err == nil {
+			return host, port
+		}
+		return host, 6379
+	}
+	return addr, 6379
 }
 
 // unbindDrivers unbinds kernel drivers
@@ -204,8 +306,6 @@ func (a *App) handleSetSensitivity(ctx context.Context, level string) {
 		a.log.Error("failed to configure slow/no-motion", "error", err)
 		return
 	}
-
-	a.interruptPoller.SetConfig(threshold, duration, level)
 
 	a.publisher.UpdateStatusField(ctx, "sensitivity", level)
 	a.publisher.UpdateStatusField(ctx, "threshold", fmt.Sprintf("0x%02X", threshold))
