@@ -150,7 +150,16 @@ func (a *App) Run(ctx context.Context) error {
 	// Connect a redis-ipc client (parallel to the existing legacy client)
 	// for HashWatcher + HandleCalls. Both connect to the same Redis.
 	host, port := splitHostPort(a.cfg.RedisAddr)
-	ipcClient, err := ipc.New(ipc.WithAddress(host), ipc.WithPort(port), ipc.WithLogger(a.log))
+	// Pool size needs to cover: 4 RPC HandleCalls (each holding a BRPOP
+	// connection), 2 HashWatcher pubsub conns, 1 connection-monitor, plus
+	// headroom for ad-hoc HGet calls during initial sync. Default of 3
+	// is far too small.
+	ipcClient, err := ipc.New(
+		ipc.WithAddress(host),
+		ipc.WithPort(port),
+		ipc.WithPoolSize(16),
+		ipc.WithLogger(a.log),
+	)
 	if err != nil {
 		return fmt.Errorf("ipc client: %w", err)
 	}
