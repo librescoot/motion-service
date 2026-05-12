@@ -95,7 +95,10 @@ func (a *App) Run(ctx context.Context) error {
 	go a.sensorPoller.Run(ctx)
 
 	if a.mag != nil {
-		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, sensorCache, a.log)
+		// Match mag_poller's initial rate to sensor_poller's so both
+		// pollers come up at the same cadence; the subscriber will
+		// re-set both in unison when vehicle:state arrives.
+		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, sensorCache, a.cfg.PollingRate, a.log)
 		go a.magPoller.Run(ctx)
 	}
 
@@ -170,7 +173,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Subscribe to the alarm hash + power-manager hash. StartWithSync issues
 	// HGETALL on each so the very first apply reflects current vehicle state.
-	a.subscriber = redis.NewSubscriber(a.ipcClient, a.controller, a.log)
+	a.subscriber = redis.NewSubscriber(a.ipcClient, a.controller, pollerGroup{a.sensorPoller, a.magPoller}, a.log)
 	if err := a.subscriber.Start(); err != nil {
 		return fmt.Errorf("start subscribers: %w", err)
 	}
@@ -413,5 +416,16 @@ func (a *App) handleStreamingToggle(ctx context.Context, state string) {
 		a.sensorPoller.Disable()
 		a.publisher.UpdateStatusField(ctx, "streaming", "disabled")
 		a.log.Info("sensor streaming disabled")
+	}
+}
+
+// pollerGroup fans a single SetRate call out to multiple pollers so the
+// subscriber doesn't need to know how many it's driving. Each entry
+// receives the same rate.
+type pollerGroup []redis.RateSetter
+
+func (g pollerGroup) SetRate(rateHz int) {
+	for _, p := range g {
+		p.SetRate(rateHz)
 	}
 }

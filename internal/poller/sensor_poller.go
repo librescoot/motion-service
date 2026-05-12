@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/librescoot/motion-service/internal/bmx"
@@ -17,10 +18,12 @@ type SensorPoller struct {
 	mag       *bmx.Magnetometer
 	publisher *redis.Publisher
 	cache     *bmx.SensorCache
-	rateHz    int
-	enabled   bool
-	mu        sync.RWMutex
 	log       *slog.Logger
+
+	rateHz     atomic.Int32   // 0 = disabled
+	rateChange chan struct{}  // buffered=1; SetRate kicks Run to reload the ticker
+	enabled    bool
+	mu         sync.RWMutex
 }
 
 // NewSensorPoller creates a new SensorPoller. The shared `cache` receives
@@ -35,21 +38,23 @@ func NewSensorPoller(
 	rateHz int,
 	log *slog.Logger,
 ) *SensorPoller {
-	return &SensorPoller{
+	p := &SensorPoller{
 		accel:     accel,
 		gyro:      gyro,
 		mag:       mag,
 		publisher: publisher,
 		cache:     cache,
-		rateHz:    rateHz,
+		log:       log,
 		// Default on — motion-service is the primary IMU producer in the
 		// post-split architecture, and downstream consumers (the debug
 		// screen, future heading code in scootui-qt) need a continuous
 		// stream out of the box. The streaming:disable command is still
 		// available for callers that want to silence it.
-		enabled: true,
-		log:     log,
+		enabled:    true,
+		rateChange: make(chan struct{}, 1),
 	}
+	p.rateHz.Store(int32(rateHz))
+	return p
 }
 
 // Enable enables sensor streaming
@@ -75,29 +80,56 @@ func (p *SensorPoller) IsEnabled() bool {
 	return p.enabled
 }
 
-// SetRate updates the polling rate
+// SetRate changes the polling cadence at runtime. Pass 0 to suspend the
+// poller (it'll wake on the next SetRate). Idempotent: no-op when the new
+// rate matches the current one. The Run goroutine recreates its ticker
+// on rate-change to apply the new interval without leaking ticks.
 func (p *SensorPoller) SetRate(rateHz int) {
-	p.rateHz = rateHz
-	p.log.Info("sensor polling rate updated", "rate_hz", rateHz)
+	if int(p.rateHz.Load()) == rateHz {
+		return
+	}
+	p.rateHz.Store(int32(rateHz))
+	select {
+	case p.rateChange <- struct{}{}:
+	default:
+	}
+	p.log.Info("sensor polling rate set", "rate_hz", rateHz)
 }
 
-// Run starts the sensor polling loop
+// Run starts the sensor polling loop. Reacts to SetRate by recreating the
+// internal time.Ticker so the new interval takes effect on the next tick.
 func (p *SensorPoller) Run(ctx context.Context) {
-	p.log.Info("starting sensor poller", "rate_hz", p.rateHz)
-
-	ticker := time.NewTicker(time.Second / time.Duration(p.rateHz))
-	defer ticker.Stop()
-
 	for {
-		select {
-		case <-ctx.Done():
-			p.log.Info("sensor poller stopped")
-			return
+		rate := int(p.rateHz.Load())
+		if rate <= 0 {
+			p.log.Info("sensor poller suspended (rate=0)")
+			select {
+			case <-ctx.Done():
+				p.log.Info("sensor poller stopped")
+				return
+			case <-p.rateChange:
+				continue
+			}
+		}
 
-		case <-ticker.C:
-			if p.IsEnabled() {
-				if err := p.poll(ctx); err != nil {
-					p.log.Error("failed to poll sensors", "error", err)
+		p.log.Info("sensor poller running", "rate_hz", rate)
+		ticker := time.NewTicker(time.Second / time.Duration(rate))
+
+	ticking:
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				p.log.Info("sensor poller stopped")
+				return
+			case <-p.rateChange:
+				ticker.Stop()
+				break ticking
+			case <-ticker.C:
+				if p.IsEnabled() {
+					if err := p.poll(ctx); err != nil {
+						p.log.Error("failed to poll sensors", "error", err)
+					}
 				}
 			}
 		}

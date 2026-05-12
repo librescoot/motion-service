@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/librescoot/motion-service/internal/bmx"
@@ -11,8 +12,6 @@ import (
 )
 
 const (
-	magPollingRateHz = 5
-
 	// Tilt-comp inputs are unreliable when the body frame is undergoing
 	// significant non-gravity acceleration; ay²+az²+ax² ≠ 1g means the accel
 	// vector isn't pure gravity. Above this excess we report tilt_compensated
@@ -38,14 +37,17 @@ const (
 )
 
 // MagPoller continuously polls the magnetometer (and accel/gyro for context)
-// and publishes a tilt-compensated heading at magPollingRateHz.
+// and publishes a tilt-compensated heading.
 type MagPoller struct {
 	mag       *bmx.Magnetometer
 	accel     *bmx.Accelerometer
-	gyro     *bmx.Gyroscope
+	gyro      *bmx.Gyroscope
 	publisher *redis.Publisher
 	cache     *bmx.SensorCache
 	log       *slog.Logger
+
+	rateHz     atomic.Int32  // 0 = suspended; positive = Hz
+	rateChange chan struct{} // buffered=1
 
 	// Three EMA states on (sin, cos) unit vectors. Wrap-safe.
 	emaFastSin, emaFastCos float64
@@ -68,34 +70,69 @@ func NewMagPoller(
 	gyro *bmx.Gyroscope,
 	publisher *redis.Publisher,
 	cache *bmx.SensorCache,
+	rateHz int,
 	log *slog.Logger,
 ) *MagPoller {
-	return &MagPoller{
-		mag:       mag,
-		accel:     accel,
-		gyro:      gyro,
-		publisher: publisher,
-		cache:     cache,
-		log:       log,
+	p := &MagPoller{
+		mag:        mag,
+		accel:      accel,
+		gyro:       gyro,
+		publisher:  publisher,
+		cache:      cache,
+		log:        log,
+		rateChange: make(chan struct{}, 1),
 	}
+	p.rateHz.Store(int32(rateHz))
+	return p
 }
 
-// Run starts the magnetometer polling loop at magPollingRateHz.
+// SetRate changes the heading-poll cadence at runtime. Same semantics as
+// SensorPoller.SetRate — 0 suspends, positive value is Hz, idempotent.
+func (p *MagPoller) SetRate(rateHz int) {
+	if int(p.rateHz.Load()) == rateHz {
+		return
+	}
+	p.rateHz.Store(int32(rateHz))
+	select {
+	case p.rateChange <- struct{}{}:
+	default:
+	}
+	p.log.Info("mag polling rate set", "rate_hz", rateHz)
+}
+
+// Run starts the magnetometer polling loop. Reacts to SetRate by
+// recreating the ticker so the new interval takes effect on the next tick.
 func (p *MagPoller) Run(ctx context.Context) {
-	p.log.Info("starting magnetometer poller", "rate_hz", magPollingRateHz)
-
-	ticker := time.NewTicker(time.Second / magPollingRateHz)
-	defer ticker.Stop()
-
 	for {
-		select {
-		case <-ctx.Done():
-			p.log.Info("magnetometer poller stopped")
-			return
+		rate := int(p.rateHz.Load())
+		if rate <= 0 {
+			p.log.Info("magnetometer poller suspended (rate=0)")
+			select {
+			case <-ctx.Done():
+				p.log.Info("magnetometer poller stopped")
+				return
+			case <-p.rateChange:
+				continue
+			}
+		}
 
-		case <-ticker.C:
-			if err := p.poll(ctx); err != nil {
-				p.log.Error("failed to poll magnetometer", "error", err)
+		p.log.Info("magnetometer poller running", "rate_hz", rate)
+		ticker := time.NewTicker(time.Second / time.Duration(rate))
+
+	ticking:
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				p.log.Info("magnetometer poller stopped")
+				return
+			case <-p.rateChange:
+				ticker.Stop()
+				break ticking
+			case <-ticker.C:
+				if err := p.poll(ctx); err != nil {
+					p.log.Error("failed to poll magnetometer", "error", err)
+				}
 			}
 		}
 	}
