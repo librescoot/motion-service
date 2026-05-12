@@ -11,11 +11,16 @@ import (
 	"github.com/librescoot/motion-service/internal/redis"
 )
 
-// InterruptPoller is the I2C-status watchdog: at a slow tick (100 ms), it
+// InterruptPoller is the I2C-status watchdog: at a slow tick (1 s), it
 // reads INT_STATUS_0 and emits a MotionEvent if either the slope or
 // slow-no-motion engine has fired. Pairs with InterruptWatcher (evdev fast
 // path) — the watcher gets there first when the kernel notices the GPIO
 // edge; the poller catches anything the watcher missed.
+//
+// The poll tick is deliberately slow (1 s, not the original 100 ms): this
+// path only matters when the evdev watcher misses an edge, which doesn't
+// happen often enough to justify 10 Hz I2C traffic. A 1 s worst-case
+// detection delay is still comfortably below the alarm engine's hysteresis.
 type InterruptPoller struct {
 	accel     *bmx.Accelerometer
 	publisher *redis.Publisher
@@ -52,7 +57,7 @@ func (p *InterruptPoller) Disable() {
 func (p *InterruptPoller) Run(ctx context.Context) {
 	p.log.Info("starting interrupt poller")
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
