@@ -42,8 +42,9 @@ const (
 type MagPoller struct {
 	mag       *bmx.Magnetometer
 	accel     *bmx.Accelerometer
-	gyro      *bmx.Gyroscope
+	gyro     *bmx.Gyroscope
 	publisher *redis.Publisher
+	cache     *bmx.SensorCache
 	log       *slog.Logger
 
 	// Three EMA states on (sin, cos) unit vectors. Wrap-safe.
@@ -57,11 +58,16 @@ type MagPoller struct {
 
 // NewMagPoller creates a MagPoller. accel and gyro may be nil; without an
 // accelerometer the poller falls back to the non-tilt-compensated heading.
+// If `cache` has a recent snapshot from sensor_poller, mag_poller consumes
+// it for tilt-comp / quality inputs instead of re-issuing the same I2C
+// reads. The direct accel/gyro fallback keeps the poller working when
+// sensor_poller is disabled or the cache is stale.
 func NewMagPoller(
 	mag *bmx.Magnetometer,
 	accel *bmx.Accelerometer,
 	gyro *bmx.Gyroscope,
 	publisher *redis.Publisher,
+	cache *bmx.SensorCache,
 	log *slog.Logger,
 ) *MagPoller {
 	return &MagPoller{
@@ -69,6 +75,7 @@ func NewMagPoller(
 		accel:     accel,
 		gyro:      gyro,
 		publisher: publisher,
+		cache:     cache,
 		log:       log,
 	}
 }
@@ -110,29 +117,46 @@ func (p *MagPoller) poll(ctx context.Context) error {
 	}
 
 	// Pull accel + gyro for tilt comp and quality estimate, in vehicle
-	// frame. Either failing just means we publish without that input.
+	// frame. Prefer the shared cache (sensor_poller refreshes it at 10 Hz
+	// in the same vehicle frame); only fall back to direct I2C if the
+	// cache is empty or stale, so we still work when sensor_poller is
+	// disabled. 250 ms maxAge comfortably covers the 5 Hz mag tick + half
+	// a sensor-poller tick of slop.
 	orientation := p.mag.Orientation()
 	var (
 		ax, ay, az, aMag float64
+		yawRateDPS       float64
 		hasAccel         bool
 	)
-	if p.accel != nil {
-		ax, ay, az, aMag, err = p.accel.ReadDataInGVehicleFrame(orientation)
-		if err != nil {
-			p.log.Warn("accel read failed, skipping tilt comp", "error", err)
-		} else {
-			hasAccel = true
-		}
+	var (
+		snap   bmx.SensorSnapshot
+		cached bool
+	)
+	if p.cache != nil {
+		snap, cached = p.cache.Load(250 * time.Millisecond)
 	}
-
-	var yawRateDPS float64
-	if p.gyro != nil {
-		_, _, _, gMag, gerr := p.gyro.ReadDataInDPSVehicleFrame(orientation)
-		if gerr == nil {
-			// Total angular speed; the gyro Z component alone misses cases
-			// where the scooter is rolling/pitching. For "is the heading
-			// changing fast right now" the magnitude is the better signal.
-			yawRateDPS = gMag
+	if cached {
+		ax, ay, az, aMag = snap.AccelX, snap.AccelY, snap.AccelZ, snap.AccelMag
+		yawRateDPS = snap.GyroMag
+		hasAccel = true
+	} else {
+		if p.accel != nil {
+			var aErr error
+			ax, ay, az, aMag, aErr = p.accel.ReadDataInGVehicleFrame(orientation)
+			if aErr != nil {
+				p.log.Warn("accel read failed, skipping tilt comp", "error", aErr)
+			} else {
+				hasAccel = true
+			}
+		}
+		if p.gyro != nil {
+			_, _, _, gMag, gerr := p.gyro.ReadDataInDPSVehicleFrame(orientation)
+			if gerr == nil {
+				// Total angular speed; the gyro Z component alone misses cases
+				// where the scooter is rolling/pitching. For "is the heading
+				// changing fast right now" the magnitude is the better signal.
+				yawRateDPS = gMag
+			}
 		}
 	}
 

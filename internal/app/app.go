@@ -86,13 +86,16 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// Sensor + magnetometer telemetry pollers run unconditionally —
-	// they're independent of the alarm-driven interrupt path.
+	// they're independent of the alarm-driven interrupt path. The shared
+	// cache lets mag_poller reuse sensor_poller's accel + gyro reads
+	// instead of duplicating ~12 I2C transactions per cycle.
+	sensorCache := bmx.NewSensorCache()
 	a.sensorPoller = poller.NewSensorPoller(
-		a.accel, a.gyro, a.mag, a.publisher, a.cfg.PollingRate, a.log)
+		a.accel, a.gyro, a.mag, a.publisher, sensorCache, a.cfg.PollingRate, a.log)
 	go a.sensorPoller.Run(ctx)
 
 	if a.mag != nil {
-		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, a.log)
+		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, sensorCache, a.log)
 		go a.magPoller.Run(ctx)
 	}
 

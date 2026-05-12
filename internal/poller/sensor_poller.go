@@ -16,18 +16,22 @@ type SensorPoller struct {
 	gyro      *bmx.Gyroscope
 	mag       *bmx.Magnetometer
 	publisher *redis.Publisher
+	cache     *bmx.SensorCache
 	rateHz    int
 	enabled   bool
 	mu        sync.RWMutex
 	log       *slog.Logger
 }
 
-// NewSensorPoller creates a new SensorPoller
+// NewSensorPoller creates a new SensorPoller. The shared `cache` receives
+// every successful vehicle-frame reading so other pollers (notably the
+// mag poller) can avoid duplicate I2C reads.
 func NewSensorPoller(
 	accel *bmx.Accelerometer,
 	gyro *bmx.Gyroscope,
 	mag *bmx.Magnetometer,
 	publisher *redis.Publisher,
+	cache *bmx.SensorCache,
 	rateHz int,
 	log *slog.Logger,
 ) *SensorPoller {
@@ -36,6 +40,7 @@ func NewSensorPoller(
 		gyro:      gyro,
 		mag:       mag,
 		publisher: publisher,
+		cache:     cache,
 		rateHz:    rateHz,
 		// Default on — motion-service is the primary IMU producer in the
 		// post-split architecture, and downstream consumers (the debug
@@ -120,6 +125,16 @@ func (p *SensorPoller) poll(ctx context.Context) error {
 	gyroX, gyroY, gyroZ, gyroMag, err := p.gyro.ReadDataInDPSVehicleFrame(orientation)
 	if err != nil {
 		return err
+	}
+
+	// Make the fresh reading available to the mag poller (and any future
+	// consumer) so they don't have to repeat the I2C work we just did.
+	if p.cache != nil {
+		p.cache.Store(bmx.SensorSnapshot{
+			Timestamp: time.Now(),
+			AccelX:    accelX, AccelY: accelY, AccelZ: accelZ, AccelMag: accelMag,
+			GyroX: gyroX, GyroY: gyroY, GyroZ: gyroZ, GyroMag: gyroMag,
+		})
 	}
 
 	reading := &redis.SensorReading{

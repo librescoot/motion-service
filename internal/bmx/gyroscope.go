@@ -55,39 +55,20 @@ func NewGyroscope(bus string) (*Gyroscope, error) {
 	return gyro, nil
 }
 
-// ReadData reads raw gyroscope data (16-bit)
+// ReadData reads raw gyroscope data (16-bit) in one block transaction.
+// Gyro data registers (0x02..0x07) auto-increment, so a single SMBus
+// I2C_BLOCK ioctl replaces six individual byte reads.
 func (g *Gyroscope) ReadData() (x, y, z int16, err error) {
-	xLSB, err := g.ReadByteData(GYRO_RATE_X_LSB)
+	buf, err := g.ReadBlockData(GYRO_RATE_X_LSB, 6)
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	xMSB, err := g.ReadByteData(GYRO_RATE_X_LSB + 1)
-	if err != nil {
-		return 0, 0, 0, err
+	if len(buf) != 6 {
+		return 0, 0, 0, fmt.Errorf("gyro ReadData: short read (%d bytes)", len(buf))
 	}
-
-	yLSB, err := g.ReadByteData(GYRO_RATE_Y_LSB)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	yMSB, err := g.ReadByteData(GYRO_RATE_Y_LSB + 1)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	zLSB, err := g.ReadByteData(GYRO_RATE_Z_LSB)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	zMSB, err := g.ReadByteData(GYRO_RATE_Z_LSB + 1)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	x = int16(xMSB)<<8 | int16(xLSB)
-	y = int16(yMSB)<<8 | int16(yLSB)
-	z = int16(zMSB)<<8 | int16(zLSB)
-
+	x = int16(buf[1])<<8 | int16(buf[0])
+	y = int16(buf[3])<<8 | int16(buf[2])
+	z = int16(buf[5])<<8 | int16(buf[4])
 	return x, y, z, nil
 }
 

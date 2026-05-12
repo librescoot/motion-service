@@ -213,13 +213,16 @@ const (
 
 // I2C/SMBus constants
 const (
-	I2C_SLAVE            = 0x0703
-	I2C_SMBUS            = 0x0720
-	I2C_SMBUS_READ       = 1
-	I2C_SMBUS_WRITE      = 0
-	I2C_SMBUS_BYTE_DATA  = 2
-	I2C_SMBUS_WORD_DATA  = 3
-	I2C_SMBUS_BLOCK_DATA = 5
+	I2C_SLAVE                = 0x0703
+	I2C_SMBUS                = 0x0720
+	I2C_SMBUS_READ           = 1
+	I2C_SMBUS_WRITE          = 0
+	I2C_SMBUS_BYTE_DATA      = 2
+	I2C_SMBUS_WORD_DATA      = 3
+	I2C_SMBUS_BLOCK_DATA     = 5
+	I2C_SMBUS_I2C_BLOCK_DATA = 8
+
+	I2C_SMBUS_BLOCK_MAX = 32
 )
 
 // SMBus I/O control data structure
@@ -292,6 +295,43 @@ func (d *i2cDevice) ReadByteData(reg byte) (byte, error) {
 		return 0, fmt.Errorf("I2C_SMBUS read failed: %v", errno)
 	}
 	return dataBlock[0], nil
+}
+
+// ReadBlockData reads `count` consecutive bytes starting at `reg` in one
+// SMBus I2C_BLOCK transaction. The BMM150/BMA253/BMG160 register file
+// auto-increments the pointer on multi-byte reads, so this returns the
+// same bytes as `count` successive ReadByteData calls but with one ioctl
+// and one START/STOP on the wire instead of N. Caller's count must be
+// 1..32; anything larger is clamped by the kernel anyway.
+func (d *i2cDevice) ReadBlockData(reg byte, count int) ([]byte, error) {
+	if count < 1 || count > I2C_SMBUS_BLOCK_MAX {
+		return nil, fmt.Errorf("ReadBlockData: invalid count %d (must be 1..%d)", count, I2C_SMBUS_BLOCK_MAX)
+	}
+	var dataBlock [34]byte
+	dataBlock[0] = byte(count)
+	data := &smbusIoctlData{
+		readWrite: I2C_SMBUS_READ,
+		command:   reg,
+		size:      I2C_SMBUS_I2C_BLOCK_DATA,
+		data:      &dataBlock,
+	}
+
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(d.fd),
+		I2C_SMBUS,
+		uintptr(unsafe.Pointer(data)),
+	)
+	if errno != 0 {
+		return nil, fmt.Errorf("I2C_SMBUS_I2C_BLOCK read failed: %v", errno)
+	}
+	got := int(dataBlock[0])
+	if got > count {
+		got = count
+	}
+	out := make([]byte, got)
+	copy(out, dataBlock[1:1+got])
+	return out, nil
 }
 
 // WriteByteData writes a byte to a register using SMBus protocol

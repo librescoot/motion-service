@@ -39,43 +39,23 @@ func NewAccelerometer(bus string) (*Accelerometer, error) {
 	return accel, nil
 }
 
-// ReadData reads raw acceleration data (12-bit)
+// ReadData reads raw acceleration data (12-bit) in one block transaction.
+// The accel data registers (0x02..0x07) auto-increment, so we pull all
+// six bytes with a single SMBus I2C_BLOCK ioctl instead of six byte reads.
 func (a *Accelerometer) ReadData() (x, y, z int16, err error) {
-	xLSB, err := a.ReadByteData(ACCEL_ACCD_X_LSB_REG)
+	buf, err := a.ReadBlockData(ACCEL_ACCD_X_LSB_REG, 6)
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	xMSB, err := a.ReadByteData(ACCEL_ACCD_X_LSB_REG + 1)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	yLSB, err := a.ReadByteData(ACCEL_ACCD_Y_LSB_REG)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	yMSB, err := a.ReadByteData(ACCEL_ACCD_Y_LSB_REG + 1)
-	if err != nil {
-		return 0, 0, 0, err
+	if len(buf) != 6 {
+		return 0, 0, 0, fmt.Errorf("accel ReadData: short read (%d bytes)", len(buf))
 	}
 
-	zLSB, err := a.ReadByteData(ACCEL_ACCD_Z_LSB_REG)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	zMSB, err := a.ReadByteData(ACCEL_ACCD_Z_LSB_REG + 1)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	x = int16(xMSB)<<8 | int16(xLSB)
-	y = int16(yMSB)<<8 | int16(yLSB)
-	z = int16(zMSB)<<8 | int16(zLSB)
-
-	x = x >> 4
-	y = y >> 4
-	z = z >> 4
-
+	// 12-bit signed; the bottom 4 bits of each LSB byte are status/sticky
+	// flags, and the arithmetic shift-right by 4 sign-extends correctly.
+	x = (int16(buf[1])<<8 | int16(buf[0])) >> 4
+	y = (int16(buf[3])<<8 | int16(buf[2])) >> 4
+	z = (int16(buf[5])<<8 | int16(buf[4])) >> 4
 	return x, y, z, nil
 }
 

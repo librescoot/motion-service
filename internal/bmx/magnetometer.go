@@ -343,38 +343,21 @@ func (m *Magnetometer) compensateZ(magDataZ int16, dataRhall uint16) int16 {
 // register 0x48). Polling faster than ODR will return drdy=false on the
 // repeat reads.
 func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err error) {
-	xLSB, err := m.ReadByteData(MAG_DATAX_LSB)
-	if err != nil {
+	// Data + RHALL live at 0x42..0x49, eight contiguous bytes — one SMBus
+	// I2C_BLOCK ioctl gets the lot.
+	buf, e := m.ReadBlockData(MAG_DATAX_LSB, 8)
+	if e != nil {
+		err = e
 		return
 	}
-	xMSB, err := m.ReadByteData(MAG_DATAX_LSB + 1)
-	if err != nil {
+	if len(buf) != 8 {
+		err = fmt.Errorf("mag ReadRaw: short read (%d bytes)", len(buf))
 		return
 	}
-	yLSB, err := m.ReadByteData(MAG_DATAY_LSB)
-	if err != nil {
-		return
-	}
-	yMSB, err := m.ReadByteData(MAG_DATAY_LSB + 1)
-	if err != nil {
-		return
-	}
-	zLSB, err := m.ReadByteData(MAG_DATAZ_LSB)
-	if err != nil {
-		return
-	}
-	zMSB, err := m.ReadByteData(MAG_DATAZ_LSB + 1)
-	if err != nil {
-		return
-	}
-	rhallLSB, err := m.ReadByteData(MAG_RHALL_LSB)
-	if err != nil {
-		return
-	}
-	rhallMSB, err := m.ReadByteData(MAG_RHALL_MSB)
-	if err != nil {
-		return
-	}
+	xLSB, xMSB := buf[0], buf[1]
+	yLSB, yMSB := buf[2], buf[3]
+	zLSB, zMSB := buf[4], buf[5]
+	rhallLSB, rhallMSB := buf[6], buf[7]
 
 	// X/Y are 13-bit signed: 5 bits in LSB[7:3], 8 bits in MSB[7:0].
 	xRaw := (uint16(xMSB) << 5) | (uint16(xLSB) >> 3)
