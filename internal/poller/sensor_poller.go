@@ -127,10 +127,10 @@ func (p *SensorPoller) poll(ctx context.Context) error {
 		return err
 	}
 
-	// Make the fresh reading available to the mag poller (and any future
-	// consumer) so they don't have to repeat the I2C work we just did.
+	// Publish the fresh IMU reading so mag_poller can skip its own
+	// accel + gyro reads when its tilt-comp path runs.
 	if p.cache != nil {
-		p.cache.Store(bmx.SensorSnapshot{
+		p.cache.StoreIMU(bmx.IMUSnapshot{
 			Timestamp: time.Now(),
 			AccelX:    accelX, AccelY: accelY, AccelZ: accelZ, AccelMag: accelMag,
 			GyroX: gyroX, GyroY: gyroY, GyroZ: gyroZ, GyroMag: gyroMag,
@@ -156,14 +156,42 @@ func (p *SensorPoller) poll(ctx context.Context) error {
 	}
 
 	if p.mag != nil {
-		magX, magY, magZ, magMag, err := p.mag.ReadDataInMicroTesla()
-		if err == nil {
+		// Prefer the mag snapshot mag_poller refreshed at 5 Hz; only fall
+		// back to a direct read when the cache is empty (first ticks) or
+		// stale (mag_poller blocked or disabled). 150 ms covers the mag
+		// chip's native 10 Hz ODR + a comfortable slop.
+		var (
+			mSnap  bmx.MagSnapshot
+			cached bool
+		)
+		if p.cache != nil {
+			mSnap, cached = p.cache.LoadMag(150 * time.Millisecond)
+		}
+		if cached {
 			reading.Mag = &redis.SensorAxis{
-				X:         magX,
-				Y:         magY,
-				Z:         magZ,
-				Magnitude: magMag,
+				X:         mSnap.X,
+				Y:         mSnap.Y,
+				Z:         mSnap.Z,
+				Magnitude: mSnap.Magnitude,
 				Unit:      "uT",
+			}
+		} else {
+			compX, compY, compZ, magX, magY, magZ, magMag, _, mErr := p.mag.ReadAll()
+			if mErr == nil {
+				reading.Mag = &redis.SensorAxis{
+					X:         magX,
+					Y:         magY,
+					Z:         magZ,
+					Magnitude: magMag,
+					Unit:      "uT",
+				}
+				if p.cache != nil {
+					p.cache.StoreMag(bmx.MagSnapshot{
+						Timestamp: time.Now(),
+						CompX:     compX, CompY: compY, CompZ: compZ,
+						X: magX, Y: magY, Z: magZ, Magnitude: magMag,
+					})
+				}
 			}
 		}
 	}

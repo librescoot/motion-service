@@ -114,6 +114,16 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		return err
 	}
 
+	// Share with sensor_poller so it can skip its own mag read on the
+	// next tick.
+	if p.cache != nil {
+		p.cache.StoreMag(bmx.MagSnapshot{
+			Timestamp: time.Now(),
+			CompX:     rawX, CompY: rawY, CompZ: rawZ,
+			X: magX, Y: magY, Z: magZ, Magnitude: magMag,
+		})
+	}
+
 	// Pull accel + gyro for tilt comp and quality estimate, in vehicle
 	// frame. Prefer the shared cache (sensor_poller refreshes it at 10 Hz
 	// in the same vehicle frame); only fall back to direct I2C if the
@@ -127,11 +137,11 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		hasAccel         bool
 	)
 	var (
-		snap   bmx.SensorSnapshot
+		snap   bmx.IMUSnapshot
 		cached bool
 	)
 	if p.cache != nil {
-		snap, cached = p.cache.Load(250 * time.Millisecond)
+		snap, cached = p.cache.LoadIMU(250 * time.Millisecond)
 	}
 	if cached {
 		ax, ay, az, aMag = snap.AccelX, snap.AccelY, snap.AccelZ, snap.AccelMag

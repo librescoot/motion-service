@@ -20,7 +20,7 @@ func main() {
 	i2cBus := flag.String("i2c-bus", "/dev/i2c-3", "I2C bus device path")
 	redisAddr := flag.String("redis", "localhost:6379", "Redis address")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	pollingRate := flag.Int("polling-rate", 10, "Sensor polling rate (Hz)")
+	pollingRate := flag.Int("polling-rate", 5, "Sensor polling rate (Hz)")
 	evdevDevice := flag.String("evdev-device", "/dev/input/by-path/platform-gpio-keys-event", "Input device for the BMX055 INT gpio-keys edge (empty to disable and use I2C poller only)")
 	evdevKeycode := flag.Int("evdev-keycode", 0x2b, "Keycode from gpio-keys device that corresponds to the BMX055 INT line")
 	version := flag.Bool("version", false, "Print version and exit")
