@@ -416,22 +416,42 @@ const magScaleUT = 16.0
 // before the orientation transform permutes/sign-flips into vehicle NED
 // and divides through by magScaleUT.
 func (m *Magnetometer) ReadDataInMicroTesla() (vx, vy, vz, magnitude float64, err error) {
-	rawX, rawY, rawZ, err := m.ReadData()
-	if err != nil {
-		return 0, 0, 0, 0, err
+	_, _, _, vx, vy, vz, magnitude, _, err = m.ReadAll()
+	return
+}
+
+// ReadAll reads the magnetometer's data registers once and returns both
+// representations of the same sample: the temperature-compensated sensor-
+// frame int16 triple (what ReadData returns), and the calibrated vehicle-
+// frame µT triple plus magnitude (what ReadDataInMicroTesla returns). One
+// I2C block read instead of two.
+//
+// Use this from the magnetometer-heavy path (mag_poller) where both forms
+// were previously fetched via back-to-back ReadData + ReadDataInMicroTesla
+// calls. drdy reports whether the chip flagged this sample as fresh —
+// polling faster than the configured ODR returns drdy=false on the
+// repeated reads.
+func (m *Magnetometer) ReadAll() (compX, compY, compZ int16, vx, vy, vz, magnitude float64, drdy bool, err error) {
+	rawX, rawY, rawZ, rhall, d, e := m.ReadRaw()
+	if e != nil {
+		err = e
+		return
 	}
+	compX = m.compensateX(rawX, rhall)
+	compY = m.compensateY(rawY, rhall)
+	compZ = m.compensateZ(rawZ, rhall)
+	drdy = d
 
 	cal := m.calibration
-	sx := float64(rawX - cal.HardIronOffset[0])
-	sy := float64(rawY - cal.HardIronOffset[1])
-	sz := float64(rawZ - cal.HardIronOffset[2])
+	sx := float64(compX - cal.HardIronOffset[0])
+	sy := float64(compY - cal.HardIronOffset[1])
+	sz := float64(compZ - cal.HardIronOffset[2])
 	vx, vy, vz = cal.Orientation.Apply(sx, sy, sz)
 	vx /= magScaleUT
 	vy /= magScaleUT
 	vz /= magScaleUT
 	magnitude = math.Sqrt(vx*vx + vy*vy + vz*vz)
-
-	return vx, vy, vz, magnitude, nil
+	return
 }
 
 // Orientation returns the orientation portion of the current calibration,

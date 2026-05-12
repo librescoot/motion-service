@@ -106,12 +106,10 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		return nil
 	}
 
-	rawX, rawY, rawZ, err := p.mag.ReadData()
-	if err != nil {
-		return err
-	}
-
-	magX, magY, magZ, magMag, err := p.mag.ReadDataInMicroTesla()
+	// Both representations come from one I2C read — the compensated
+	// sensor-frame int16 (for the raw_* log fields) and the calibrated
+	// vehicle-frame µT triple (for heading + publish).
+	rawX, rawY, rawZ, magX, magY, magZ, magMag, _, err := p.mag.ReadAll()
 	if err != nil {
 		return err
 	}
