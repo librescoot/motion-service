@@ -210,33 +210,71 @@ func splitHostPort(addr string) (string, int) {
 	return addr, 6379
 }
 
-// unbindDrivers unbinds kernel drivers
+// unbindDrivers unbinds kernel drivers. driver.Unbind now blocks until the
+// kernel has actually released each device, so no extra settle sleep is
+// needed afterwards.
 func (a *App) unbindDrivers() error {
 	a.log.Info("unbinding kernel drivers")
 
 	if err := driver.UnbindBMX055(); err != nil {
 		a.log.Warn("failed to unbind BMX055 drivers", "error", err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
 	return nil
+}
+
+// sensorInitAttempts and sensorInitBackoff bound the retry-with-backoff
+// applied to the first chip-ID read for each BMX055 sensor. The kernel can
+// briefly fail the i2c transaction immediately after unbind even though the
+// unbind sysfs path reports the device is gone; retrying handles that
+// transient ENXIO without crashing the service.
+const (
+	sensorInitAttempts = 5
+	sensorInitBackoff  = 200 * time.Millisecond
+)
+
+// initWithRetry runs the sensor constructor up to sensorInitAttempts times,
+// backing off between attempts. The first attempt's failure is the common
+// case on cold boot right after unbinding the kernel driver.
+func initWithRetry[T any](sensor string, log *slog.Logger, ctor func() (*T, error)) (*T, error) {
+	var lastErr error
+	for i := 0; i < sensorInitAttempts; i++ {
+		v, err := ctor()
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+		if i+1 < sensorInitAttempts {
+			log.Warn("sensor init failed, retrying",
+				"sensor", sensor,
+				"attempt", i+1,
+				"of", sensorInitAttempts,
+				"backoff", sensorInitBackoff,
+				"error", err)
+			time.Sleep(sensorInitBackoff)
+		}
+	}
+	return nil, lastErr
 }
 
 // initSensors initializes all sensors
 func (a *App) initSensors() error {
-	var err error
-
 	a.log.Info("initializing accelerometer")
-	a.accel, err = bmx.NewAccelerometer(a.cfg.I2CBus)
+	accel, err := initWithRetry("accelerometer", a.log, func() (*bmx.Accelerometer, error) {
+		return bmx.NewAccelerometer(a.cfg.I2CBus)
+	})
 	if err != nil {
 		return fmt.Errorf("init accelerometer: %w", err)
 	}
+	a.accel = accel
 
 	a.log.Info("initializing gyroscope")
-	a.gyro, err = bmx.NewGyroscope(a.cfg.I2CBus)
+	gyro, err := initWithRetry("gyroscope", a.log, func() (*bmx.Gyroscope, error) {
+		return bmx.NewGyroscope(a.cfg.I2CBus)
+	})
 	if err != nil {
 		return fmt.Errorf("init gyroscope: %w", err)
 	}
+	a.gyro = gyro
 
 	a.log.Info("calibrating gyroscope (keep scooter stationary)")
 	if err := a.gyro.Calibrate(100); err != nil {

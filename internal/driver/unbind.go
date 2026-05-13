@@ -6,7 +6,16 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
+
+// unbindSettleTimeout caps how long we'll wait for the kernel to actually
+// release the device after writing the unbind file. The write itself is
+// non-blocking; the i2c device only becomes free for userspace access once
+// the kernel's detach path completes, and racing it leads to ENXIO on the
+// first SMBUS read (see bean librescoot-o7in).
+const unbindSettleTimeout = 2 * time.Second
+const unbindPollInterval = 10 * time.Millisecond
 
 // DriverBinding represents a kernel driver that needs to be unbound
 type DriverBinding struct {
@@ -14,10 +23,17 @@ type DriverBinding struct {
 	DeviceID   string
 }
 
-// Unbind unbinds a kernel driver from a device
+// Unbind unbinds a kernel driver from a device and waits for the kernel to
+// actually release it (or returns an error after unbindSettleTimeout). Safe
+// to call on drivers or devices that aren't currently bound.
 func Unbind(driverName, deviceID string) error {
-	unbindPath := filepath.Join("/sys/bus/i2c/drivers", driverName, "unbind")
+	boundPath := filepath.Join("/sys/bus/i2c/drivers", driverName, deviceID)
+	if _, err := os.Stat(boundPath); os.IsNotExist(err) {
+		// Driver isn't bound to this device — nothing to do.
+		return nil
+	}
 
+	unbindPath := filepath.Join("/sys/bus/i2c/drivers", driverName, "unbind")
 	file, err := os.OpenFile(unbindPath, os.O_WRONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -25,19 +41,37 @@ func Unbind(driverName, deviceID string) error {
 		}
 		return fmt.Errorf("failed to open unbind file %s: %w", unbindPath, err)
 	}
-	defer file.Close()
 
-	_, err = file.WriteString(deviceID)
-	if err != nil {
+	_, writeErr := file.WriteString(deviceID)
+	closeErr := file.Close()
+	if writeErr != nil {
 		// ENODEV = device isn't bound to this driver. That's exactly what
 		// we wanted, so don't surface it as an error.
-		if errors.Is(err, syscall.ENODEV) {
+		if errors.Is(writeErr, syscall.ENODEV) {
 			return nil
 		}
-		return fmt.Errorf("failed to write device ID to unbind file: %w", err)
+		return fmt.Errorf("failed to write device ID to unbind file: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close unbind file: %w", closeErr)
 	}
 
-	return nil
+	return waitForDetach(boundPath)
+}
+
+// waitForDetach polls until the kernel symlink for the bound device is gone,
+// or until unbindSettleTimeout elapses.
+func waitForDetach(boundPath string) error {
+	deadline := time.Now().Add(unbindSettleTimeout)
+	for {
+		if _, err := os.Stat(boundPath); os.IsNotExist(err) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("kernel did not release %s within %v", boundPath, unbindSettleTimeout)
+		}
+		time.Sleep(unbindPollInterval)
+	}
 }
 
 // UnbindBMX055 unbinds any kernel driver that may be holding one of the
