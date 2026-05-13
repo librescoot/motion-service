@@ -1,6 +1,6 @@
 # motion-service
 
-Hardware abstraction service for the BMX055 9-axis sensor package on LibreScoot.
+Hardware abstraction service for the BMX055 9-axis sensor package on Librescoot.
 
 ## Features
 

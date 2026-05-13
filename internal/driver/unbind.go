@@ -79,7 +79,7 @@ func waitForDetach(boundPath string) error {
 // driver names have changed across kernel versions:
 //   - Magnetometer is bmc150_magn_i2c on 5.4+ (matches DT compatible
 //     "bosch,bmm050"); the older bmm150_i2c name is also tried.
-//   - Accelerometer drivers are usually disabled in the LibreScoot kernel
+//   - Accelerometer drivers are usually disabled in the Librescoot kernel
 //     config but we still try in case a future image leaves them enabled.
 //   - Gyroscope likewise.
 //
