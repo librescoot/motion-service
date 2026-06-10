@@ -34,25 +34,32 @@ func NewGyroscope(bus string) (*Gyroscope, error) {
 		return nil, fmt.Errorf("invalid gyroscope chip ID: 0x%02X (expected 0x0F)", chipID)
 	}
 
-	// Set to normal power mode
-	if err := gyro.WriteByteData(GYRO_LPM1, 0x00); err != nil {
+	if err := gyro.Configure(); err != nil {
 		gyro.Close()
-		return nil, fmt.Errorf("failed to set gyroscope power mode: %w", err)
-	}
-
-	// Set range to ±500°/s (0x02)
-	if err := gyro.WriteByteData(GYRO_RANGE, 0x02); err != nil {
-		gyro.Close()
-		return nil, fmt.Errorf("failed to set gyroscope range: %w", err)
-	}
-
-	// Set filter bandwidth to 47 Hz (0x03: 400 Hz ODR, 47 Hz filter)
-	if err := gyro.WriteByteData(GYRO_BW, 0x03); err != nil {
-		gyro.Close()
-		return nil, fmt.Errorf("failed to set gyroscope filter bandwidth: %w", err)
+		return nil, err
 	}
 
 	return gyro, nil
+}
+
+// Configure sets the gyroscope's operating mode: normal power, ±500°/s range
+// (matching the 65.6 LSB/°/s scale in ReadDataInDPS) and the 47 Hz filter.
+// These revert to chip defaults on a soft reset, so Configure must be
+// re-applied after any reset (e.g. on every profile apply).
+func (g *Gyroscope) Configure() error {
+	// Normal power mode
+	if err := g.WriteByteData(GYRO_LPM1, 0x00); err != nil {
+		return fmt.Errorf("failed to set gyroscope power mode: %w", err)
+	}
+	// Range ±500°/s (0x02)
+	if err := g.WriteByteData(GYRO_RANGE, 0x02); err != nil {
+		return fmt.Errorf("failed to set gyroscope range: %w", err)
+	}
+	// Filter bandwidth 47 Hz (0x03: 400 Hz ODR, 47 Hz filter)
+	if err := g.WriteByteData(GYRO_BW, 0x03); err != nil {
+		return fmt.Errorf("failed to set gyroscope filter bandwidth: %w", err)
+	}
+	return nil
 }
 
 // ReadData reads raw gyroscope data (16-bit) in one block transaction.

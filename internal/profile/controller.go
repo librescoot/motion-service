@@ -109,6 +109,13 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 	}
 	time.Sleep(10 * time.Millisecond)
 
+	// Step 1b: re-apply the gyro config the soft reset wiped (range/filter).
+	// Otherwise ReadDataInDPS's ±500°/s scale no longer matches the chip's
+	// default ±2000°/s and gyro rates read 4x too small.
+	if err := c.gyro.Configure(); err != nil {
+		return fmt.Errorf("configure gyro: %w", err)
+	}
+
 	// Step 2: bandwidth.
 	if err := c.accel.SetBandwidth(spec.Sensor.Bandwidth); err != nil {
 		return fmt.Errorf("set bandwidth: %w", err)
