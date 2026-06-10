@@ -95,10 +95,14 @@ func Configs(p Profile) Spec {
 		}
 	case Waiting:
 		// sensorWaiting: slow-motion at 7.81 Hz, ~23 mg, 4 samples (~512 ms).
+		// Enabled with INT1 (not the nRF) so the slow-motion engine latches
+		// into INT_STATUS_0 and the poller can re-trigger L2 on continued
+		// motion during the waiting-movement window. Polling relies on latched
+		// mode, which is only configured when a pin is set.
 		return Spec{
 			Sensor:          bmx.SensorConfig{Mode: bmx.InterruptModeSlowMotion, Bandwidth: bmx.ACCEL_BW_7_81HZ, Threshold: 0x06, Duration: 0x03},
-			InterruptPin:    bmx.InterruptPinNone,
-			EnableInterrupt: false,
+			InterruptPin:    bmx.InterruptPinINT1,
+			EnableInterrupt: true,
 		}
 	default:
 		return Configs(Idle)
