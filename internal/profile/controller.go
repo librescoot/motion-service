@@ -100,12 +100,24 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 		c.watcher.Disable()
 	}
 
-	// Step 1: soft-reset both accel and gyro. ~10 ms settle.
+	// Step 1: soft-reset both accel and gyro. The accel glitches the shared
+	// I2C bus while it restarts (~2 ms); i2c-imx on kernel 6.12 surfaces that
+	// as arbitration loss (EAGAIN) on the next transfer, where 5.4 let it
+	// slide. Settle after the accel reset and retry the gyro reset.
 	if err := c.accel.SoftReset(); err != nil {
 		return fmt.Errorf("accel soft reset: %w", err)
 	}
-	if err := c.gyro.SoftReset(); err != nil {
-		return fmt.Errorf("gyro soft reset: %w", err)
+	time.Sleep(10 * time.Millisecond)
+	var gyroErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if gyroErr = c.gyro.SoftReset(); gyroErr == nil {
+			break
+		}
+		c.log.Warn("gyro soft reset failed, retrying", "attempt", attempt+1, "error", gyroErr)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if gyroErr != nil {
+		return fmt.Errorf("gyro soft reset: %w", gyroErr)
 	}
 	time.Sleep(10 * time.Millisecond)
 
