@@ -3,6 +3,7 @@ package bmx
 import (
 	"fmt"
 	"math"
+	"time"
 )
 
 // Gyroscope represents the BMX055 gyroscope
@@ -139,10 +140,29 @@ func (g *Gyroscope) Calibrate(samples int) error {
 	return nil
 }
 
-// SoftReset performs a soft reset of the gyroscope
+// SoftReset performs a soft reset of the gyroscope. The BMG160 begins its
+// reset the moment it receives the command and glitches the bus mid-
+// transaction; i2c-imx on kernel 6.12 reports that as arbitration loss
+// (EAGAIN) even though the command was delivered (5.4 let it slide), so
+// the write error is advisory only. What decides success is whether the
+// chip answers with the right ID once its start-up time has passed.
 func (g *Gyroscope) SoftReset() error {
-	if err := g.WriteByteData(GYRO_BGW_SOFTRESET, 0xB6); err != nil {
-		return fmt.Errorf("failed to soft reset gyroscope: %w", err)
+	writeErr := g.WriteByteData(GYRO_BGW_SOFTRESET, 0xB6)
+
+	// BMG160 start-up time is 30 ms; poll the chip ID until it responds.
+	var idErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		time.Sleep(10 * time.Millisecond)
+		var chipID byte
+		if chipID, idErr = g.ReadByteData(GYRO_CHIP_ID_REG); idErr == nil {
+			if chipID == 0x0F {
+				return nil
+			}
+			idErr = fmt.Errorf("invalid gyroscope chip ID: 0x%02X (expected 0x0F)", chipID)
+		}
 	}
-	return nil
+	if writeErr != nil {
+		return fmt.Errorf("failed to soft reset gyroscope: %w (chip unresponsive afterwards: %v)", writeErr, idErr)
+	}
+	return fmt.Errorf("gyroscope unresponsive after soft reset: %w", idErr)
 }
