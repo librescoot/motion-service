@@ -72,22 +72,42 @@ back to X/Y-only and accuracy is reported accordingly.
 - `heading-tilt` (float, deg)
 - `heading-tilt-comp` (`true`/`false`)
 
-### Accepted Commands
+### RPC (`motion:rpc`)
 
-Via `scooter:motion` queue:
-```bash
-LPUSH scooter:motion sensitivity:low|medium|high
-LPUSH scooter:motion pin:int1|int2|none
-LPUSH scooter:motion interrupt:enable|disable
-LPUSH scooter:motion reset
-LPUSH scooter:motion polling:10
-```
+Chip configuration is derived reactively from the `alarm` and
+`power-manager` hashes, so there is nothing to set by hand in normal
+operation. The RPC channel covers the synchronous cases:
 
-## Sensitivity Presets
+| method | request | what it does |
+|---|---|---|
+| `prepare-hibernation` | `{"profile":"armed-hibernation"}` | Applies the profile and returns once the registers are programmed. alarm-service calls this before releasing pm-service's suspend inhibitor. |
+| `get-calibration` | `{}` | Returns hard-iron offsets, axis remap and yaw offset. |
+| `clear-latch` | `{}` | Clears a stuck latched interrupt. |
+| `soft-reset` | `{}` | Resets accel + gyro, then reprograms the current profile so the chip does not sit at register defaults. |
+| `set-polling` | `{"rate_hz":10}` | Overrides the telemetry poll rate (1-100). The vehicle-state watcher re-derives the rate on the next `vehicle.state` change, so this does not stick. |
+| `set-streaming` | `{"enabled":false}` | Gates the `motion:sensors` stream. |
 
-- **LOW**: threshold=0x10 (least sensitive)
-- **MEDIUM**: threshold=0x09 (default)
-- **HIGH**: threshold=0x08 (most sensitive)
+The `scooter:motion` command queue was removed. It had no producer other
+than hand-typed `redis-cli`, and its `sensitivity` / `pin` / `interrupt`
+commands wrote registers that the profile controller overwrote on the
+next alarm or power-manager transition, so a manual change silently
+reverted at an unpredictable moment. `reset` duplicated `soft-reset`.
+`polling` and `streaming` live on as the RPC methods above.
+
+## Profiles
+
+Sensitivity is a property of the applied profile, not a separate setting:
+
+| profile | engine | threshold | interrupt |
+|---|---|---|---|
+| `idle` | slow-motion | 0x14 | off |
+| `armed-awake` | any-motion | 0x06 | INT1+INT2 |
+| `armed-hibernation` | slow-motion | 0x06 | INT1 |
+
+`Derive(alarm.status, power-manager.state)` picks the profile. The
+`motion` hash reports the applied one in `current-profile`, alongside
+`mode`, `bandwidth`, `threshold`, `duration`, `pin` and `interrupt`,
+which describe what is actually in the chip's registers.
 
 ## Deployment
 
@@ -157,9 +177,8 @@ chip's response.
 # Monitor sensor data
 redis-cli -h 10.7.0.4 SUBSCRIBE motion:sensors
 
-# Test motion detection
-redis-cli -h 10.7.0.4 LPUSH scooter:motion sensitivity:medium
-redis-cli -h 10.7.0.4 LPUSH scooter:motion interrupt:enable
+# Test motion detection. The chip is armed by the alarm hash, not by hand:
+redis-cli -h 10.7.0.4 HGET motion current-profile   # expect armed-awake when armed
 redis-cli -h 10.7.0.4 SUBSCRIBE motion:interrupt
 # Shake the scooter - should see interrupt events
 ```

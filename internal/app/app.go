@@ -32,7 +32,6 @@ type Config struct {
 type App struct {
 	cfg       *Config
 	log       *slog.Logger
-	redis     *redis.Client
 	ipcClient *ipc.Client
 	publisher *redis.Publisher
 	accel     *bmx.Accelerometer
@@ -68,13 +67,24 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("unbind drivers: %w", err)
 	}
 
-	a.redis = redis.NewClient(a.cfg.RedisAddr, a.log)
-	if err := a.redis.Connect(ctx); err != nil {
+	// One redis-ipc client for everything: publisher, hash watchers and
+	// the RPC server. redis-ipc multiplexes all subscriptions onto a
+	// single pub/sub connection and all queues onto a single BRPOP, so
+	// the default pool is enough.
+	host, port := splitHostPort(a.cfg.RedisAddr)
+	ipcClient, err := ipc.New(
+		ipc.WithAddress(host),
+		ipc.WithPort(port),
+		ipc.WithLogger(a.log),
+	)
+	if err != nil {
 		return fmt.Errorf("connect to redis: %w", err)
 	}
-	defer a.redis.Close()
+	a.ipcClient = ipcClient
+	defer ipcClient.Close()
 
-	a.publisher = redis.NewPublisher(a.redis, a.log)
+	a.publisher = redis.NewPublisher(a.ipcClient, a.log)
+	a.publisher.PruneLegacyFields(ctx)
 
 	if err := a.initSensors(); err != nil {
 		return fmt.Errorf("init sensors: %w", err)
@@ -153,24 +163,6 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 
-	// Connect a redis-ipc client (parallel to the existing legacy client)
-	// for HashWatcher + HandleCalls. Both connect to the same Redis.
-	host, port := splitHostPort(a.cfg.RedisAddr)
-	// Pool size needs to cover: 1 RPC CallServer BRPOP, 2 HashWatcher
-	// pubsub conns, 1 connection-monitor, plus headroom for ad-hoc HGet
-	// calls during initial sync. 8 is plenty.
-	ipcClient, err := ipc.New(
-		ipc.WithAddress(host),
-		ipc.WithPort(port),
-		ipc.WithPoolSize(8),
-		ipc.WithLogger(a.log),
-	)
-	if err != nil {
-		return fmt.Errorf("ipc client: %w", err)
-	}
-	a.ipcClient = ipcClient
-	defer ipcClient.Close()
-
 	// Subscribe to the alarm hash + power-manager hash. StartWithSync issues
 	// HGETALL on each so the very first apply reflects current vehicle state.
 	a.subscriber = redis.NewSubscriber(a.ipcClient, a.controller, pollerGroup{a.sensorPoller, a.magPoller}, a.log)
@@ -180,18 +172,14 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.subscriber.Stop()
 
 	// Register RPC handlers (prepare-hibernation, get-calibration, ...)
-	a.rpcServer = rpcpkg.New(a.ipcClient, a.controller, a.accel, a.gyro, a.log)
+	a.rpcServer = rpcpkg.New(a.ipcClient, a.controller, a.accel, a.gyro,
+		pollerGroup{a.sensorPoller, a.magPoller}, a.sensorPoller, a.publisher, a.log)
 	a.rpcServer.Start()
 	defer a.rpcServer.Stop()
 
 	if err := a.publisher.PublishReady(ctx); err != nil {
 		a.log.Warn("publish ready failed", "error", err)
 	}
-
-	// Legacy scooter:motion command queue — kept for now so manual dev
-	// commands keep working. Will be retired when nothing pushes to it.
-	cmdHandler := redis.NewCommandHandler(a.redis, a.log, a.handleCommand)
-	go cmdHandler.Run(ctx)
 
 	<-ctx.Done()
 	a.log.Info("shutting down")
@@ -309,152 +297,19 @@ func (a *App) closeSensors() {
 
 // publishInitialStatus publishes initial status to Redis
 func (a *App) publishInitialStatus(ctx context.Context) error {
+	// Deliberately does not seed interrupt / pin / threshold / duration:
+	// profile.Controller writes those from the spec it just programmed, so
+	// seeding them here would publish a chip state that is not true yet.
 	status := map[string]string{
 		"initialized":              "true",
 		"polling-rate-hz":          fmt.Sprintf("%d", a.cfg.PollingRate),
 		"streaming":                "enabled",
-		"interrupt":                "disabled",
-		"pin":                      "none",
-		"threshold":                "0x00",
-		"duration":                 "0x00",
-		"sensitivity":              "none",
 		"last-interrupt-timestamp": "0",
 		"error-count":              "0",
 		"last-error":               "",
 	}
 
 	return a.publisher.PublishStatus(ctx, status)
-}
-
-// handleCommand handles a command from Redis
-func (a *App) handleCommand(action, param string) {
-	ctx := context.Background()
-
-	switch action {
-	case "sensitivity":
-		a.handleSetSensitivity(ctx, param)
-	case "pin":
-		a.handleSetInterruptPin(ctx, param)
-	case "interrupt":
-		a.handleInterruptToggle(ctx, param)
-	case "reset":
-		a.handleSoftReset(ctx)
-	case "polling":
-		a.handleSetPollingRate(ctx, param)
-	case "streaming":
-		a.handleStreamingToggle(ctx, param)
-	default:
-		a.log.Warn("unknown command", "command", action)
-	}
-}
-
-// handleSetSensitivity handles the sensitivity command
-func (a *App) handleSetSensitivity(ctx context.Context, level string) {
-	sens := bmx.ParseSensitivity(level)
-	threshold := sens.GetThreshold()
-	duration := sens.GetDuration()
-
-	if err := a.accel.ConfigureSlowNoMotion(threshold, duration); err != nil {
-		a.log.Error("failed to configure slow/no-motion", "error", err)
-		return
-	}
-
-	a.publisher.UpdateStatusField(ctx, "sensitivity", level)
-	a.publisher.UpdateStatusField(ctx, "threshold", fmt.Sprintf("0x%02X", threshold))
-	a.publisher.UpdateStatusField(ctx, "duration", fmt.Sprintf("0x%02X", duration))
-
-	a.log.Info("sensitivity updated", "level", level, "threshold", threshold, "duration", duration)
-}
-
-// handleSetInterruptPin handles the pin command
-func (a *App) handleSetInterruptPin(ctx context.Context, pinStr string) {
-	pin := bmx.ParseInterruptPin(pinStr)
-
-	if pin == bmx.InterruptPinNone {
-		if err := a.accel.DisableInterruptMapping(); err != nil {
-			a.log.Error("failed to disable interrupt mapping", "error", err)
-			return
-		}
-	} else {
-		useInt2 := pin == bmx.InterruptPinINT2
-		if err := a.accel.ConfigureInterruptPin(useInt2, true); err != nil {
-			a.log.Error("failed to configure interrupt pin", "error", err)
-			return
-		}
-		if err := a.accel.MapInterruptToPin(useInt2); err != nil {
-			a.log.Error("failed to map interrupt to pin", "error", err)
-			return
-		}
-	}
-
-	a.publisher.UpdateStatusField(ctx, "pin", pinStr)
-	a.log.Info("interrupt pin updated", "pin", pinStr)
-}
-
-// handleInterruptToggle handles the interrupt enable/disable command
-func (a *App) handleInterruptToggle(ctx context.Context, state string) {
-	if state == "enable" {
-		if err := a.accel.EnableSlowNoMotionInterrupt(true); err != nil {
-			a.log.Error("failed to enable interrupt", "error", err)
-			return
-		}
-		a.interruptPoller.Enable()
-		a.publisher.UpdateStatusField(ctx, "interrupt", "enabled")
-		a.log.Info("interrupt enabled")
-	} else if state == "disable" {
-		if err := a.accel.DisableSlowNoMotionInterrupt(); err != nil {
-			a.log.Error("failed to disable interrupt", "error", err)
-			return
-		}
-		a.interruptPoller.Disable()
-		a.publisher.UpdateStatusField(ctx, "interrupt", "disabled")
-		a.log.Info("interrupt disabled")
-	}
-}
-
-// handleSoftReset handles the reset command
-func (a *App) handleSoftReset(ctx context.Context) {
-	a.log.Info("performing soft reset")
-
-	if err := a.accel.SoftReset(); err != nil {
-		a.log.Error("failed to reset accelerometer", "error", err)
-	}
-
-	if err := a.gyro.SoftReset(); err != nil {
-		a.log.Error("failed to reset gyroscope", "error", err)
-	}
-
-	time.Sleep(10 * time.Millisecond)
-
-	a.publisher.UpdateStatusField(ctx, "interrupt", "disabled")
-	a.publisher.UpdateStatusField(ctx, "sensitivity", "none")
-	a.log.Info("soft reset complete")
-}
-
-// handleSetPollingRate handles the polling rate command
-func (a *App) handleSetPollingRate(ctx context.Context, rateStr string) {
-	rate, err := strconv.Atoi(strings.TrimSpace(rateStr))
-	if err != nil || rate < 1 || rate > 100 {
-		a.log.Error("invalid polling rate", "rate", rateStr)
-		return
-	}
-
-	a.sensorPoller.SetRate(rate)
-	a.publisher.UpdateStatusField(ctx, "polling-rate-hz", fmt.Sprintf("%d", rate))
-	a.log.Info("polling rate updated", "rate_hz", rate)
-}
-
-// handleStreamingToggle handles the streaming enable/disable command
-func (a *App) handleStreamingToggle(ctx context.Context, state string) {
-	if state == "enable" {
-		a.sensorPoller.Enable()
-		a.publisher.UpdateStatusField(ctx, "streaming", "enabled")
-		a.log.Info("sensor streaming enabled")
-	} else if state == "disable" {
-		a.sensorPoller.Disable()
-		a.publisher.UpdateStatusField(ctx, "streaming", "disabled")
-		a.log.Info("sensor streaming disabled")
-	}
 }
 
 // pollerGroup fans a single SetRate call out to multiple pollers so the
