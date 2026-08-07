@@ -61,10 +61,24 @@ func (c *Controller) Current() Profile {
 	return c.current
 }
 
+// Invalidate drops the cached profile so the next Apply reprograms the
+// chip even if the profile is unchanged. Anything that writes the chip's
+// registers behind the controller's back must call this, otherwise the
+// idempotence check below skips the re-apply and the chip is left in
+// whatever state that write produced. Soft reset is the case that
+// matters: it wipes the motion engine, and on an armed scooter a skipped
+// re-apply means no motion detection until the profile happens to change.
+func (c *Controller) Invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hasFirst = false
+}
+
 // Apply reconfigures the chip for the given profile. Soft-reset → set
 // bandwidth → configure motion engine → 100 ms settle + double-clear-latch
 // → map to INT pins → enable interrupt sources. Idempotent — re-applying
-// the same profile after the first call is a no-op unless force is true.
+// the same profile is a no-op once it has been applied, unless
+// Invalidate has been called since.
 //
 // The 100 ms settle window is load-bearing: the bandwidth change kicks off
 // a low-pass filter settle that can produce a transient slope large enough
@@ -189,8 +203,22 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 	c.current = p
 	c.hasFirst = true
 
+	// Report what is actually in the chip's registers. These fields used
+	// to be written only by the manual scooter:motion commands, so they
+	// drifted the moment a profile was applied and ended up claiming
+	// interrupts were disabled on a chip that had them armed.
 	if c.publisher != nil {
-		_ = c.publisher.UpdateStatusField(ctx, "current-profile", p.String())
+		for field, value := range map[string]string{
+			"current-profile": p.String(),
+			"mode":            spec.Sensor.Mode.String(),
+			"bandwidth":       fmt.Sprintf("0x%02X", spec.Sensor.Bandwidth),
+			"threshold":       fmt.Sprintf("0x%02X", spec.Sensor.Threshold),
+			"duration":        fmt.Sprintf("0x%02X", spec.Sensor.Duration),
+			"pin":             spec.InterruptPin.String(),
+			"interrupt":       map[bool]string{true: "enabled", false: "disabled"}[spec.EnableInterrupt],
+		} {
+			_ = c.publisher.UpdateStatusField(ctx, field, value)
+		}
 	}
 
 	c.log.Info("profile applied", "profile", p.String())
