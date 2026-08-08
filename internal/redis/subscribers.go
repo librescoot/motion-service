@@ -84,7 +84,9 @@ func (s *Subscriber) Start() error {
 	s.pmW.SetDebounce(50 * time.Millisecond)
 	s.pmW.OnField("state", s.handlePmState)
 	if err := s.pmW.StartWithSync(); err != nil {
-		s.alarmW.Stop()
+		if stopErr := s.alarmW.Stop(); stopErr != nil {
+			s.log.Warn("failed to stop alarm watcher during rollback", "error", stopErr)
+		}
 		return fmt.Errorf("start power-manager watcher: %w", err)
 	}
 
@@ -93,8 +95,12 @@ func (s *Subscriber) Start() error {
 		s.vehicleW.SetDebounce(50 * time.Millisecond)
 		s.vehicleW.OnField("state", s.handleVehicleState)
 		if err := s.vehicleW.StartWithSync(); err != nil {
-			s.alarmW.Stop()
-			s.pmW.Stop()
+			if stopErr := s.alarmW.Stop(); stopErr != nil {
+				s.log.Warn("failed to stop alarm watcher during rollback", "error", stopErr)
+			}
+			if stopErr := s.pmW.Stop(); stopErr != nil {
+				s.log.Warn("failed to stop power-manager watcher during rollback", "error", stopErr)
+			}
 			return fmt.Errorf("start vehicle watcher: %w", err)
 		}
 	}
@@ -106,13 +112,19 @@ func (s *Subscriber) Start() error {
 // Stop tears down all watchers.
 func (s *Subscriber) Stop() {
 	if s.alarmW != nil {
-		s.alarmW.Stop()
+		if err := s.alarmW.Stop(); err != nil {
+			s.log.Warn("failed to stop alarm watcher", "error", err)
+		}
 	}
 	if s.pmW != nil {
-		s.pmW.Stop()
+		if err := s.pmW.Stop(); err != nil {
+			s.log.Warn("failed to stop power-manager watcher", "error", err)
+		}
 	}
 	if s.vehicleW != nil {
-		s.vehicleW.Stop()
+		if err := s.vehicleW.Stop(); err != nil {
+			s.log.Warn("failed to stop vehicle watcher", "error", err)
+		}
 	}
 }
 

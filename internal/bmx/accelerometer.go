@@ -22,17 +22,17 @@ func NewAccelerometer(bus string) (*Accelerometer, error) {
 
 	chipID, err := accel.ReadByteData(ACCEL_CHIP_ID_REG)
 	if err != nil {
-		accel.Close()
+		_ = accel.Close()
 		return nil, fmt.Errorf("failed to read accelerometer chip ID: %w", err)
 	}
 
 	if chipID != 0xFA && chipID != 0xFB {
-		accel.Close()
+		_ = accel.Close()
 		return nil, fmt.Errorf("invalid accelerometer chip ID: 0x%02X (expected 0xFA or 0xFB)", chipID)
 	}
 
 	if err := accel.WriteByteData(ACCEL_PMU_LPW, 0x00); err != nil {
-		accel.Close()
+		_ = accel.Close()
 		return nil, fmt.Errorf("failed to set accelerometer power mode: %w", err)
 	}
 

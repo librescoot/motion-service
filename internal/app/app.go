@@ -285,13 +285,19 @@ func (a *App) initSensors() error {
 // closeSensors closes all sensors
 func (a *App) closeSensors() {
 	if a.accel != nil {
-		a.accel.Close()
+		if err := a.accel.Close(); err != nil {
+			a.log.Warn("failed to close accelerometer", "error", err)
+		}
 	}
 	if a.gyro != nil {
-		a.gyro.Close()
+		if err := a.gyro.Close(); err != nil {
+			a.log.Warn("failed to close gyroscope", "error", err)
+		}
 	}
 	if a.mag != nil {
-		a.mag.Close()
+		if err := a.mag.Close(); err != nil {
+			a.log.Warn("failed to close magnetometer", "error", err)
+		}
 	}
 }
 

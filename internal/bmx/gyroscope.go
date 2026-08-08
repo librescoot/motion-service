@@ -26,17 +26,17 @@ func NewGyroscope(bus string) (*Gyroscope, error) {
 
 	chipID, err := gyro.ReadByteData(GYRO_CHIP_ID_REG)
 	if err != nil {
-		gyro.Close()
+		_ = gyro.Close()
 		return nil, fmt.Errorf("failed to read gyroscope chip ID: %w", err)
 	}
 
 	if chipID != 0x0F {
-		gyro.Close()
+		_ = gyro.Close()
 		return nil, fmt.Errorf("invalid gyroscope chip ID: 0x%02X (expected 0x0F)", chipID)
 	}
 
 	if err := gyro.Configure(); err != nil {
-		gyro.Close()
+		_ = gyro.Close()
 		return nil, err
 	}
 

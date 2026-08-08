@@ -131,8 +131,11 @@ func (p *Publisher) IncrementErrorCount(ctx context.Context, errorMsg string) er
 		countStr = "0"
 	}
 
+	// A malformed stored value leaves count at its zero value, which is the
+	// right fallback: the counter restarts from 1 rather than blocking on a
+	// corrupt hash field.
 	var count int
-	fmt.Sscanf(countStr, "%d", &count)
+	_, _ = fmt.Sscanf(countStr, "%d", &count)
 	count++
 
 	return p.UpdateStatusField(ctx, "error-count", fmt.Sprintf("%d", count))

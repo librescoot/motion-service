@@ -255,7 +255,7 @@ func openI2C(bus string, addr byte) (*i2cDevice, error) {
 		uintptr(addr),
 	)
 	if errno != 0 {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("failed to set I2C slave address 0x%02X: %v", addr, errno)
 	}
 

@@ -108,7 +108,7 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 
 	// Enable power control bit (equivalent to bmm050_init power enable)
 	if err := mag.WriteByteData(MAG_POWER_CTRL, 0x01); err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to enable magnetometer power: %w", err)
 	}
 
@@ -117,12 +117,12 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 	// Verify chip ID
 	chipID, err := mag.ReadByteData(MAG_CHIP_ID_REG)
 	if err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to read magnetometer chip ID: %w", err)
 	}
 
 	if chipID != 0x32 {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("invalid magnetometer chip ID: 0x%02X (expected 0x32)", chipID)
 	}
 
@@ -130,11 +130,11 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 	// accuracy is specified for this preset, not for the power-on default of
 	// 1 rep which is loud enough to be unusable as a compass.
 	if err := mag.WriteByteData(MAG_REPXY, MAG_REPXY_REGULAR); err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to set magnetometer REPXY: %w", err)
 	}
 	if err := mag.WriteByteData(MAG_REPZ, MAG_REPZ_REGULAR); err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to set magnetometer REPZ: %w", err)
 	}
 
@@ -143,13 +143,13 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 	// of noisier data than is useful.
 	opmodeOdr := byte(MAG_OPMODE_NORMAL | MAG_ODR_10HZ)
 	if err := mag.WriteByteData(MAG_OPMODE_ODR, opmodeOdr); err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to set magnetometer operation mode: %w", err)
 	}
 
 	// Read trim data for temperature compensation
 	if err := mag.readTrimData(); err != nil {
-		mag.Close()
+		_ = mag.Close()
 		return nil, fmt.Errorf("failed to read magnetometer trim data: %w", err)
 	}
 

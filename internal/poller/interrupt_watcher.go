@@ -69,7 +69,9 @@ func (w *InterruptWatcher) Open() error {
 // Close releases the input device and unblocks any outstanding read.
 func (w *InterruptWatcher) Close() {
 	if w.file != nil {
-		w.file.Close()
+		if err := w.file.Close(); err != nil {
+			w.log.Warn("failed to close interrupt watcher device", "error", err)
+		}
 		w.file = nil
 		w.log.Info("interrupt watcher closed")
 	}
