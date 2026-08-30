@@ -8,33 +8,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// I2C addresses for BMX055 sensors
 const (
 	BMX055_ACCEL_ADDR = 0x18
 	BMX055_GYRO_ADDR  = 0x68
 	BMX055_MAG_ADDR   = 0x10
 )
 
-// Orientation maps the BMX055 chip's intrinsic XYZ axes onto a vehicle
-// body frame. All three sensors in the package (BMA253 accel, BMG160 gyro,
-// BMM150 mag) share the same axis system, so a single orientation applies
-// uniformly to whichever ReadDataIn*VehicleFrame helper the caller uses.
-//
-// AxisOrder maps each vehicle axis to a sensor index (0=X, 1=Y, 2=Z).
-// AxisSign is ±1 per VEHICLE axis, applied after permutation.
-//
-// Example: chip mounted face-down on the PCB underside and rotated 90° so
-// chip +Y points to vehicle forward, chip +X to vehicle right, chip +Z to
-// vehicle down (NED frame):
-//
-//	Orientation{AxisOrder: [3]int{1, 0, 2}, AxisSign: [3]float64{1, 1, 1}}
+// Orientation maps the shared BMX055 sensor axes into the vehicle frame:
+// AxisOrder permutes axes and AxisSign applies vehicle-axis polarity.
 type Orientation struct {
 	AxisOrder [3]int
 	AxisSign  [3]float64
 }
 
-// Apply maps a sensor-frame triple (sx, sy, sz) into the vehicle frame
-// described by this Orientation.
 func (o Orientation) Apply(sx, sy, sz float64) (vx, vy, vz float64) {
 	src := [3]float64{sx, sy, sz}
 	return o.AxisSign[0] * src[o.AxisOrder[0]],
@@ -42,7 +28,6 @@ func (o Orientation) Apply(sx, sy, sz float64) (vx, vy, vz float64) {
 		o.AxisSign[2] * src[o.AxisOrder[2]]
 }
 
-// Accelerometer registers
 const (
 	ACCEL_CHIP_ID_REG          = 0x00
 	ACCEL_ACCD_X_LSB_REG       = 0x02
@@ -70,7 +55,6 @@ const (
 	ACCEL_SLO_NO_MOT_THRESHOLD = 0x29
 )
 
-// Accelerometer interrupt bits
 const (
 	ACCEL_INT_EN_SLOW_NO_MOTION_X   = 0x01
 	ACCEL_INT_EN_SLOW_NO_MOTION_Y   = 0x02
@@ -78,15 +62,13 @@ const (
 	ACCEL_INT_EN_SLOW_NO_MOTION_SEL = 0x08
 	ACCEL_INT_STATUS_SLOW_NO_MOT    = 0x08
 
-	// Slope (any-motion) engine — register INT_EN_0 (0x16)
 	ACCEL_INT_EN_SLOPE_X = 0x01
 	ACCEL_INT_EN_SLOPE_Y = 0x02
 	ACCEL_INT_EN_SLOPE_Z = 0x04
 
-	ACCEL_INT_STATUS_SLOPE = 0x04 // INT_STATUS_0 bit
+	ACCEL_INT_STATUS_SLOPE = 0x04
 )
 
-// Accelerometer interrupt mapping
 const (
 	ACCEL_INT1_MAP_SLOW_NO_MOTION = 0x08
 	ACCEL_INT2_MAP_SLOW_NO_MOTION = 0x08
@@ -94,32 +76,29 @@ const (
 	ACCEL_INT2_MAP_SLOPE          = 0x04
 )
 
-// Slope-engine duration/threshold registers
+// Register 0x27 shares slope duration (bits 1:0) with slow-motion duration.
 const (
-	ACCEL_SLOPE_DURATION  = 0x27 // bits[1:0] — shared with slo_no_mot_dur in bits[7:2]
-	ACCEL_SLOPE_THRESHOLD = 0x28 // 1 LSB = 3.91 mg in 2g range
+	ACCEL_SLOPE_DURATION  = 0x27
+	ACCEL_SLOPE_THRESHOLD = 0x28
 )
 
-// Accelerometer bandwidth values for PMU_BW (0x10).
-// ODR = 2 * BW. Power-on default is 1000 Hz; must be set explicitly after every soft reset.
+// ODR is twice the selected accelerometer bandwidth; reset defaults to 1000 Hz.
 const (
-	ACCEL_BW_7_81HZ  = 0x08 // 7.81 Hz, sample period 64 ms
-	ACCEL_BW_15_63HZ = 0x09 // 15.63 Hz, sample period 32 ms
-	ACCEL_BW_31_25HZ = 0x0A // 31.25 Hz, sample period 16 ms
-	ACCEL_BW_62_5HZ  = 0x0B // 62.5 Hz, sample period 8 ms
+	ACCEL_BW_7_81HZ  = 0x08
+	ACCEL_BW_15_63HZ = 0x09
+	ACCEL_BW_31_25HZ = 0x0A
+	ACCEL_BW_62_5HZ  = 0x0B
 	ACCEL_BW_125HZ   = 0x0C
 	ACCEL_BW_250HZ   = 0x0D
 	ACCEL_BW_500HZ   = 0x0E
 	ACCEL_BW_1000HZ  = 0x0F
 )
 
-// Interrupt latch modes
 const (
 	ACCEL_INT_NON_LATCHED = 0x00
 	ACCEL_INT_LATCHED     = 0x0F
 )
 
-// Interrupt output control
 const (
 	ACCEL_INT1_ACTIVE_HIGH = 0x01
 	ACCEL_INT1_OPEN_DRAIN  = 0x02
@@ -127,7 +106,6 @@ const (
 	ACCEL_INT2_OPEN_DRAIN  = 0x08
 )
 
-// Gyroscope registers
 const (
 	GYRO_CHIP_ID_REG   = 0x00
 	GYRO_RATE_X_LSB    = 0x02
@@ -139,7 +117,6 @@ const (
 	GYRO_BGW_SOFTRESET = 0x14
 )
 
-// Magnetometer registers
 const (
 	MAG_DATAX_LSB   = 0x42
 	MAG_DATAY_LSB   = 0x44
@@ -153,22 +130,17 @@ const (
 	MAG_REPZ        = 0x52
 )
 
-// Magnetometer preset values (REPXY, REPZ) per Bosch BMM150 reference.
-// Reps encode as nXY = 1 + 2*REPXY and nZ = 1 + REPZ.
-// Default after power-on is REPXY=REPZ=0x00 (1 rep) — noisiest possible.
 const (
-	MAG_REPXY_LOWPOWER  = 0x01 // 3 reps
-	MAG_REPZ_LOWPOWER   = 0x02 // 3 reps
-	MAG_REPXY_REGULAR   = 0x04 // 9 reps
-	MAG_REPZ_REGULAR    = 0x0E // 15 reps
-	MAG_REPXY_ENHANCED  = 0x07 // 15 reps
-	MAG_REPZ_ENHANCED   = 0x1A // 27 reps
-	MAG_REPXY_HIGHACC   = 0x17 // 47 reps
-	MAG_REPZ_HIGHACC    = 0x52 // 83 reps
+	MAG_REPXY_LOWPOWER = 0x01
+	MAG_REPZ_LOWPOWER  = 0x02
+	MAG_REPXY_REGULAR  = 0x04
+	MAG_REPZ_REGULAR   = 0x0E
+	MAG_REPXY_ENHANCED = 0x07
+	MAG_REPZ_ENHANCED  = 0x1A
+	MAG_REPXY_HIGHACC  = 0x17
+	MAG_REPZ_HIGHACC   = 0x52
 )
 
-// Magnetometer OPMODE_ODR (0x4C) field encodings.
-// Bits 5-3: data rate. Bits 2-1: opmode. Bit 0: self-test.
 const (
 	MAG_ODR_10HZ = 0x00 << 3
 	MAG_ODR_2HZ  = 0x01 << 3
@@ -184,7 +156,6 @@ const (
 	MAG_OPMODE_SLEEP  = 0x03 << 1
 )
 
-// Magnetometer trim registers (compensation parameters)
 const (
 	MAG_DIG_X1       = 0x5D
 	MAG_DIG_Y1       = 0x5E
@@ -204,14 +175,12 @@ const (
 	MAG_DIG_XY1      = 0x71
 )
 
-// Magnetometer overflow constants
 const (
 	BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL = -4096
 	BMM150_ZAXIS_HALL_OVERFLOW_ADCVAL  = -16384
 	BMM150_OVERFLOW_OUTPUT             = -32768
 )
 
-// I2C/SMBus constants
 const (
 	I2C_SLAVE                = 0x0703
 	I2C_SMBUS                = 0x0720
@@ -225,7 +194,7 @@ const (
 	I2C_SMBUS_BLOCK_MAX = 32
 )
 
-// SMBus I/O control data structure
+// Linux's SMBus ioctl ABI expects a 34-byte data union.
 type smbusIoctlData struct {
 	readWrite byte
 	command   byte
@@ -233,15 +202,13 @@ type smbusIoctlData struct {
 	data      *[34]byte
 }
 
-// i2cDevice represents a generic I2C device
 type i2cDevice struct {
-	fd      int
-	bus     string
-	addr    byte
-	name    string
+	fd   int
+	bus  string
+	addr byte
+	name string
 }
 
-// openI2C opens the I2C bus and sets the slave address
 func openI2C(bus string, addr byte) (*i2cDevice, error) {
 	fd, err := unix.Open(bus, unix.O_RDWR, 0)
 	if err != nil {
@@ -266,7 +233,6 @@ func openI2C(bus string, addr byte) (*i2cDevice, error) {
 	}, nil
 }
 
-// Close closes the I2C device
 func (d *i2cDevice) Close() error {
 	if d.fd >= 0 {
 		return unix.Close(d.fd)
@@ -274,7 +240,6 @@ func (d *i2cDevice) Close() error {
 	return nil
 }
 
-// ReadByteData reads a byte from a register using SMBus protocol
 func (d *i2cDevice) ReadByteData(reg byte) (byte, error) {
 	var dataBlock [34]byte
 	data := &smbusIoctlData{
@@ -297,12 +262,6 @@ func (d *i2cDevice) ReadByteData(reg byte) (byte, error) {
 	return dataBlock[0], nil
 }
 
-// ReadBlockData reads `count` consecutive bytes starting at `reg` in one
-// SMBus I2C_BLOCK transaction. The BMM150/BMA253/BMG160 register file
-// auto-increments the pointer on multi-byte reads, so this returns the
-// same bytes as `count` successive ReadByteData calls but with one ioctl
-// and one START/STOP on the wire instead of N. Caller's count must be
-// 1..32; anything larger is clamped by the kernel anyway.
 func (d *i2cDevice) ReadBlockData(reg byte, count int) ([]byte, error) {
 	if count < 1 || count > I2C_SMBUS_BLOCK_MAX {
 		return nil, fmt.Errorf("ReadBlockData: invalid count %d (must be 1..%d)", count, I2C_SMBUS_BLOCK_MAX)
@@ -334,7 +293,6 @@ func (d *i2cDevice) ReadBlockData(reg byte, count int) ([]byte, error) {
 	return out, nil
 }
 
-// WriteByteData writes a byte to a register using SMBus protocol
 func (d *i2cDevice) WriteByteData(reg, value byte) error {
 	var dataBlock [34]byte
 	dataBlock[0] = value

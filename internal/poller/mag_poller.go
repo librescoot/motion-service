@@ -12,32 +12,15 @@ import (
 )
 
 const (
-	// Tilt-comp inputs are unreliable when the body frame is undergoing
-	// significant non-gravity acceleration; ay²+az²+ax² ≠ 1g means the accel
-	// vector isn't pure gravity. Above this excess we report tilt_compensated
-	// = false and fall back to the X/Y-only heading. Tightened from 0.20 to
-	// 0.05 g after observing heading deflection during normal scooter
-	// throttle bursts (typical forward acceleration on a 2 kW scooter is
-	// 0.1–0.3 g; the looser threshold let those leak into the tilt-comp).
 	tiltCompMaxExcessG = 0.05
 
-	// Three EMA smoothing levels for the heading, all on the (sin, cos)
-	// unit-vector representation so the 0°/360° wrap is handled
-	// naturally. Time constant τ = -dt / ln(1-α). At 5 Hz:
-	//   fast α=0.50 → τ ≈ 0.3 s   (responsive, removes single-sample noise)
-	//   med  α=0.15 → τ ≈ 1.2 s   (good balance — published as heading_deg)
-	//   slow α=0.05 → τ ≈ 3.9 s   (very stable, lags through hard turns)
 	headingEMAAlphaFast = 0.50
 	headingEMAAlphaMed  = 0.15
 	headingEMAAlphaSlow = 0.05
 
-	// Datasheet ±2.5° heading accuracy at the Regular preset; we treat that
-	// as the floor and add penalties for tilt, dynamic accel, and yaw rate.
 	baseAccuracyDeg = 2.5
 )
 
-// MagPoller continuously polls the magnetometer (and accel/gyro for context)
-// and publishes a tilt-compensated heading.
 type MagPoller struct {
 	mag       *bmx.Magnetometer
 	accel     *bmx.Accelerometer
@@ -46,10 +29,9 @@ type MagPoller struct {
 	cache     *bmx.SensorCache
 	log       *slog.Logger
 
-	rateHz     atomic.Int32  // 0 = suspended; positive = Hz
-	rateChange chan struct{} // buffered=1
+	rateHz     atomic.Int32
+	rateChange chan struct{}
 
-	// Three EMA states on (sin, cos) unit vectors. Wrap-safe.
 	emaFastSin, emaFastCos float64
 	emaMedSin, emaMedCos   float64
 	emaSlowSin, emaSlowCos float64
@@ -58,12 +40,6 @@ type MagPoller struct {
 	pollCount int
 }
 
-// NewMagPoller creates a MagPoller. accel and gyro may be nil; without an
-// accelerometer the poller falls back to the non-tilt-compensated heading.
-// If `cache` has a recent snapshot from sensor_poller, mag_poller consumes
-// it for tilt-comp / quality inputs instead of re-issuing the same I2C
-// reads. The direct accel/gyro fallback keeps the poller working when
-// sensor_poller is disabled or the cache is stale.
 func NewMagPoller(
 	mag *bmx.Magnetometer,
 	accel *bmx.Accelerometer,
@@ -86,8 +62,6 @@ func NewMagPoller(
 	return p
 }
 
-// SetRate changes the heading-poll cadence at runtime. Same semantics as
-// SensorPoller.SetRate — 0 suspends, positive value is Hz, idempotent.
 func (p *MagPoller) SetRate(rateHz int) {
 	if int(p.rateHz.Load()) == rateHz {
 		return
@@ -100,8 +74,6 @@ func (p *MagPoller) SetRate(rateHz int) {
 	p.log.Info("mag polling rate set", "rate_hz", rateHz)
 }
 
-// Run starts the magnetometer polling loop. Reacts to SetRate by
-// recreating the ticker so the new interval takes effect on the next tick.
 func (p *MagPoller) Run(ctx context.Context) {
 	for {
 		rate := int(p.rateHz.Load())
@@ -143,16 +115,11 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		return nil
 	}
 
-	// Both representations come from one I2C read — the compensated
-	// sensor-frame int16 (for the raw_* log fields) and the calibrated
-	// vehicle-frame µT triple (for heading + publish).
 	rawX, rawY, rawZ, magX, magY, magZ, magMag, _, err := p.mag.ReadAll()
 	if err != nil {
 		return err
 	}
 
-	// Share with sensor_poller so it can skip its own mag read on the
-	// next tick.
 	if p.cache != nil {
 		p.cache.StoreMag(bmx.MagSnapshot{
 			Timestamp: time.Now(),
@@ -161,12 +128,6 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		})
 	}
 
-	// Pull accel + gyro for tilt comp and quality estimate, in vehicle
-	// frame. Prefer the shared cache (sensor_poller refreshes it at 10 Hz
-	// in the same vehicle frame); only fall back to direct I2C if the
-	// cache is empty or stale, so we still work when sensor_poller is
-	// disabled. 250 ms maxAge comfortably covers the 5 Hz mag tick + half
-	// a sensor-poller tick of slop.
 	orientation := p.mag.Orientation()
 	var (
 		ax, ay, az, aMag float64
@@ -197,20 +158,12 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		if p.gyro != nil {
 			_, _, _, gMag, gerr := p.gyro.ReadDataInDPSVehicleFrame(orientation)
 			if gerr == nil {
-				// Total angular speed; the gyro Z component alone misses cases
-				// where the scooter is rolling/pitching. For "is the heading
-				// changing fast right now" the magnitude is the better signal.
+
 				yawRateDPS = gMag
 			}
 		}
 	}
 
-	// Compute heading. Tilt-compensate when accel is plausibly gravity.
-	// rollRad/pitchRad below are NED-standard Tait-Bryan from accel — at
-	// rest in NED, accel = (0, 0, -g) so atan2(ay, az) = π. The tilt-comp
-	// math in HeadingFromVector handles that 180° offset correctly via
-	// sin/cos, but it's misleading as a *displayed* tilt magnitude. So
-	// we compute tiltDeg separately from the level-aware formula.
 	rollRad := math.NaN()
 	pitchRad := math.NaN()
 	tiltDeg := 0.0
@@ -223,9 +176,7 @@ func (p *MagPoller) poll(ctx context.Context) error {
 			pitchRad = math.Atan2(-ax, math.Sqrt(ay*ay+az*az))
 			tiltCompensated = true
 		}
-		// Combined tilt from level: at rest level NED (0,0,-1g), the
-		// horizontal magnitude is 0 and -az = +1, so atan2 = 0. As the
-		// vehicle tilts away from level the horizontal component grows.
+
 		horiz := math.Sqrt(ax*ax + ay*ay)
 		tiltDeg = math.Atan2(horiz, -az) * 180.0 / math.Pi
 	}
@@ -249,11 +200,6 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		p.pollCount = 0
 	}
 
-	// Magnetometer values are already in the motion:sensors payload at 10 Hz —
-	// we don't need a separate motion:magnetometer channel just for the same
-	// data at half the rate. Suppresses ~750 B/s of redundant pub/sub
-	// traffic over the USB-ethernet link to the DBC.
-
 	reading := &redis.HeadingReading{
 		Timestamp:       time.Now().UnixMilli(),
 		HeadingDeg:      headingMed,
@@ -270,44 +216,27 @@ func (p *MagPoller) poll(ctx context.Context) error {
 	return p.publisher.PublishHeading(ctx, reading)
 }
 
-// estimateAccuracyDeg returns a 1-σ-ish heading accuracy estimate in degrees.
-// Heuristic — not statistically rigorous; consumers should use it as
-// "trust this heading more or less" rather than a hard error bar.
 func estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS float64, tiltCompensated bool) float64 {
 	a := baseAccuracyDeg
 
 	if !tiltCompensated {
-		// X/Y-only heading: error grows roughly linearly with tilt.
-		// 30° tilt → ~10° heading error; cap so the number stays usable.
+
 		a += math.Min(tiltDeg*0.5, 45.0)
 	} else {
-		// Tilt comp leaves residual error from accel-derived roll/pitch
-		// uncertainty. Smaller penalty.
+
 		a += tiltDeg * 0.05
 	}
 
-	// Dynamic acceleration corrupts accel-derived tilt: 0.1 g excess →
-	// roughly +5° (gravity vector deflected by atan(0.1)).
 	a += excessG * 50.0
 
-	// Heading is changing fast; smoothed value is stale. 50°/s → +5°.
 	a += yawRateDPS * 0.1
 
-	// Magnetic noise floor — even with reps, expect at least the datasheet
-	// value of 2.5° for a single sample.
 	if a < baseAccuracyDeg {
 		a = baseAccuracyDeg
 	}
 	return a
 }
 
-// smoothHeadings updates all three EMA filters on the (sin, cos) unit
-// vectors of the new heading and returns each as a degrees-in-[0,360)
-// triple. EMA on the unit vectors handles 0°/360° wrap naturally — a
-// linear EMA on degrees would lurch 360° at the wraparound and pollute
-// the average for many samples afterwards.
-//
-// First sample seeds all three filters so there's no warm-up.
 func (p *MagPoller) smoothHeadings(newHeading float64) (fast, med, slow float64) {
 	rad := newHeading * math.Pi / 180.0
 	s := math.Sin(rad)

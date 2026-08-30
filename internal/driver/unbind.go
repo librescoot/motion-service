@@ -9,27 +9,19 @@ import (
 	"time"
 )
 
-// unbindSettleTimeout caps how long we'll wait for the kernel to actually
-// release the device after writing the unbind file. The write itself is
-// non-blocking; the i2c device only becomes free for userspace access once
-// the kernel's detach path completes, and racing it leads to ENXIO on the
-// first SMBUS read (see bean librescoot-o7in).
+// sysfs unbind is asynchronous; reading I²C before detach completes can return ENXIO.
 const unbindSettleTimeout = 2 * time.Second
 const unbindPollInterval = 10 * time.Millisecond
 
-// DriverBinding represents a kernel driver that needs to be unbound
 type DriverBinding struct {
 	DriverName string
 	DeviceID   string
 }
 
-// Unbind unbinds a kernel driver from a device and waits for the kernel to
-// actually release it (or returns an error after unbindSettleTimeout). Safe
-// to call on drivers or devices that aren't currently bound.
 func Unbind(driverName, deviceID string) error {
 	boundPath := filepath.Join("/sys/bus/i2c/drivers", driverName, deviceID)
 	if _, err := os.Stat(boundPath); os.IsNotExist(err) {
-		// Driver isn't bound to this device — nothing to do.
+
 		return nil
 	}
 
@@ -45,8 +37,7 @@ func Unbind(driverName, deviceID string) error {
 	_, writeErr := file.WriteString(deviceID)
 	closeErr := file.Close()
 	if writeErr != nil {
-		// ENODEV = device isn't bound to this driver. That's exactly what
-		// we wanted, so don't surface it as an error.
+
 		if errors.Is(writeErr, syscall.ENODEV) {
 			return nil
 		}
@@ -59,8 +50,7 @@ func Unbind(driverName, deviceID string) error {
 	return waitForDetach(boundPath)
 }
 
-// waitForDetach polls until the kernel symlink for the bound device is gone,
-// or until unbindSettleTimeout elapses.
+// sysfs unbind returns before the kernel has released the I²C device.
 func waitForDetach(boundPath string) error {
 	deadline := time.Now().Add(unbindSettleTimeout)
 	for {
@@ -74,17 +64,7 @@ func waitForDetach(boundPath string) error {
 	}
 }
 
-// UnbindBMX055 unbinds any kernel driver that may be holding one of the
-// BMX055 sensors. We try multiple driver names per sensor because the IIO
-// driver names have changed across kernel versions:
-//   - Magnetometer is bmc150_magn_i2c on 5.4+ (matches DT compatible
-//     "bosch,bmm050"); the older bmm150_i2c name is also tried.
-//   - Accelerometer drivers are usually disabled in the Librescoot kernel
-//     config but we still try in case a future image leaves them enabled.
-//   - Gyroscope likewise.
-//
-// Unbind is a no-op if the driver path or device binding doesn't exist;
-// only an unexpected open/write failure surfaces as an error.
+// Kernel driver names vary by image; absent bindings are intentionally no-ops.
 func UnbindBMX055() error {
 	drivers := []DriverBinding{
 		{"bmc150_accel_i2c", "3-0018"},

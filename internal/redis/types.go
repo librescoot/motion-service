@@ -1,6 +1,6 @@
 package redis
 
-// SensorAxis represents a 3-axis sensor reading
+// SensorAxis is a public motion:sensors JSON value; Unit qualifies all axes.
 type SensorAxis struct {
 	X         float64 `json:"x"`
 	Y         float64 `json:"y"`
@@ -9,7 +9,6 @@ type SensorAxis struct {
 	Unit      string  `json:"unit"`
 }
 
-// SensorReading represents all sensor data at a point in time
 type SensorReading struct {
 	Timestamp int64       `json:"timestamp"`
 	Accel     SensorAxis  `json:"accel"`
@@ -17,30 +16,26 @@ type SensorReading struct {
 	Mag       *SensorAxis `json:"mag,omitempty"`
 }
 
-// MotionEvent is the lightweight alarm-facing envelope published on
-// motion:interrupt. Consumers (alarm-service primarily) feed Type into
-// their FSM and use Engine to disambiguate any-motion vs slow-motion
-// without reading the chip themselves.
+// MotionEvent is the alarm-facing motion:interrupt contract. Type is "edge"
+// or "wake-hibernation"; Engine distinguishes any- from slow-motion.
 type MotionEvent struct {
-	Type      string `json:"type"`             // "edge" | "wake-hibernation"
+	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"`
-	Engine    string `json:"engine,omitempty"` // "any-motion" | "slow-motion" | ""
+	Engine    string `json:"engine,omitempty"`
 }
 
-// HeadingReading is the rich magnetic-heading payload published on
-// the motion:heading channel. Consumers should weight HeadingDeg by
-// AccuracyDeg (or roll their own gating using ExcessG / YawRateDPS /
-// TiltDeg) — this is the data needed to do that, not a verdict.
+// HeadingReading is the motion:heading contract. HeadingDeg is the medium EMA;
+// consumers should use AccuracyDeg and quality fields rather than treat it as exact.
 type HeadingReading struct {
 	Timestamp       int64   `json:"timestamp"`
-	HeadingDeg      float64 `json:"heading_deg"`      // medium EMA, the canonical "smoothed" value
-	HeadingRawDeg   float64 `json:"heading_raw_deg"`  // unsmoothed, this sample only
-	HeadingFastDeg  float64 `json:"heading_fast_deg"` // fast EMA, τ ≈ 0.3 s — responsive
-	HeadingSlowDeg  float64 `json:"heading_slow_deg"` // slow EMA, τ ≈ 3.9 s — stable
-	AccuracyDeg     float64 `json:"accuracy_deg"`     // heuristic 1-σ estimate
-	TiltCompensated bool    `json:"tilt_compensated"` // false → X/Y-only fallback
-	TiltDeg         float64 `json:"tilt_deg"`         // angle from level (0 at rest)
-	MagStrengthUT   float64 `json:"mag_strength_ut"`  // |B| in vehicle frame
-	ExcessG         float64 `json:"excess_g"`         // ||a|-1g| — non-gravity accel
-	YawRateDPS      float64 `json:"yaw_rate_dps"`     // |gyro| total turn rate
+	HeadingDeg      float64 `json:"heading_deg"`
+	HeadingRawDeg   float64 `json:"heading_raw_deg"`
+	HeadingFastDeg  float64 `json:"heading_fast_deg"`
+	HeadingSlowDeg  float64 `json:"heading_slow_deg"`
+	AccuracyDeg     float64 `json:"accuracy_deg"`
+	TiltCompensated bool    `json:"tilt_compensated"`
+	TiltDeg         float64 `json:"tilt_deg"`
+	MagStrengthUT   float64 `json:"mag_strength_ut"`
+	ExcessG         float64 `json:"excess_g"`
+	YawRateDPS      float64 `json:"yaw_rate_dps"`
 }

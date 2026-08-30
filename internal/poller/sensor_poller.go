@@ -11,7 +11,6 @@ import (
 	"github.com/librescoot/motion-service/internal/redis"
 )
 
-// SensorPoller continuously polls sensors and publishes data
 type SensorPoller struct {
 	accel     *bmx.Accelerometer
 	gyro      *bmx.Gyroscope
@@ -20,15 +19,12 @@ type SensorPoller struct {
 	cache     *bmx.SensorCache
 	log       *slog.Logger
 
-	rateHz     atomic.Int32   // 0 = disabled
-	rateChange chan struct{}  // buffered=1; SetRate kicks Run to reload the ticker
+	rateHz     atomic.Int32
+	rateChange chan struct{}
 	enabled    bool
 	mu         sync.RWMutex
 }
 
-// NewSensorPoller creates a new SensorPoller. The shared `cache` receives
-// every successful vehicle-frame reading so other pollers (notably the
-// mag poller) can avoid duplicate I2C reads.
 func NewSensorPoller(
 	accel *bmx.Accelerometer,
 	gyro *bmx.Gyroscope,
@@ -45,11 +41,7 @@ func NewSensorPoller(
 		publisher: publisher,
 		cache:     cache,
 		log:       log,
-		// Default on — motion-service is the primary IMU producer in the
-		// post-split architecture, and downstream consumers (the debug
-		// screen, future heading code in scootui-qt) need a continuous
-		// stream out of the box. The streaming:disable command is still
-		// available for callers that want to silence it.
+
 		enabled:    true,
 		rateChange: make(chan struct{}, 1),
 	}
@@ -57,7 +49,6 @@ func NewSensorPoller(
 	return p
 }
 
-// Enable enables sensor streaming
 func (p *SensorPoller) Enable() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -65,7 +56,6 @@ func (p *SensorPoller) Enable() {
 	p.log.Info("sensor streaming enabled")
 }
 
-// Disable disables sensor streaming
 func (p *SensorPoller) Disable() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -73,17 +63,12 @@ func (p *SensorPoller) Disable() {
 	p.log.Info("sensor streaming disabled")
 }
 
-// IsEnabled returns whether sensor streaming is enabled
 func (p *SensorPoller) IsEnabled() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.enabled
 }
 
-// SetRate changes the polling cadence at runtime. Pass 0 to suspend the
-// poller (it'll wake on the next SetRate). Idempotent: no-op when the new
-// rate matches the current one. The Run goroutine recreates its ticker
-// on rate-change to apply the new interval without leaking ticks.
 func (p *SensorPoller) SetRate(rateHz int) {
 	if int(p.rateHz.Load()) == rateHz {
 		return
@@ -96,8 +81,6 @@ func (p *SensorPoller) SetRate(rateHz int) {
 	p.log.Info("sensor polling rate set", "rate_hz", rateHz)
 }
 
-// Run starts the sensor polling loop. Reacts to SetRate by recreating the
-// internal time.Ticker so the new interval takes effect on the next tick.
 func (p *SensorPoller) Run(ctx context.Context) {
 	for {
 		rate := int(p.rateHz.Load())
@@ -136,10 +119,6 @@ func (p *SensorPoller) Run(ctx context.Context) {
 	}
 }
 
-// poll reads all sensors in vehicle frame and publishes the data. The
-// orientation comes from the magnetometer's calibration (the only place
-// it lives) — falls back to identity if no mag is wired so the service
-// still works without it.
 func (p *SensorPoller) poll(ctx context.Context) error {
 	orientation := bmx.Orientation{
 		AxisOrder: [3]int{0, 1, 2},
@@ -159,8 +138,6 @@ func (p *SensorPoller) poll(ctx context.Context) error {
 		return err
 	}
 
-	// Publish the fresh IMU reading so mag_poller can skip its own
-	// accel + gyro reads when its tilt-comp path runs.
 	if p.cache != nil {
 		p.cache.StoreIMU(bmx.IMUSnapshot{
 			Timestamp: time.Now(),
@@ -188,10 +165,7 @@ func (p *SensorPoller) poll(ctx context.Context) error {
 	}
 
 	if p.mag != nil {
-		// Prefer the mag snapshot mag_poller refreshed at 5 Hz; only fall
-		// back to a direct read when the cache is empty (first ticks) or
-		// stale (mag_poller blocked or disabled). 150 ms covers the mag
-		// chip's native 10 Hz ODR + a comfortable slop.
+
 		var (
 			mSnap  bmx.MagSnapshot
 			cached bool

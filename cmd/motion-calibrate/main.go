@@ -1,20 +1,3 @@
-// bmx-calibrate captures raw BMX055 sensor data to a CSV file for offline
-// magnetometer calibration. It is intended to be run as a one-shot systemd
-// unit that conflicts with librescoot-alarm and librescoot-bmx so the BMX055
-// is exclusively owned during capture.
-//
-// Output is /data/bmx-cal-<unix-ts>.csv by default, with a header line and
-// one row per sample:
-//
-//	timestamp_ms,mag_raw_x,mag_raw_y,mag_raw_z,
-//	  ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps
-//
-// Raw mag values are post-temperature-compensation int16 LSB, before any
-// hard-iron correction — that's what an offline calibration fit needs.
-//
-// Live progress prints running min/max and the implied hard-iron offset
-// every progress-every. On exit a JSON calibration summary is printed for
-// drop-in use as the magnetometer Calibration struct.
 package main
 
 import (
@@ -93,10 +76,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Disable hard-iron / orientation baked into Magnetometer so anything
-	// that reads µT here represents the raw chip output. We don't actually
-	// log µT to the CSV, but a future revision might, and this keeps
-	// downstream consumers honest.
 	mag.SetCalibration(bmx.Calibration{
 		HardIronOffset: [3]int16{0, 0, 0},
 		Orientation: bmx.Orientation{

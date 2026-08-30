@@ -12,40 +12,25 @@ import (
 	"github.com/librescoot/motion-service/internal/profile"
 )
 
-// ProfileApplier is the subset of profile.Controller the Subscriber needs.
-// Defined here to avoid import cycles and to make testing easy.
 type ProfileApplier interface {
 	Apply(ctx context.Context, p profile.Profile) error
 }
 
-// RateSetter is the subset of poller.SensorPoller the Subscriber drives.
-// SetRate(0) means "suspend"; positive values are Hz.
 type RateSetter interface {
 	SetRate(rateHz int)
 }
 
-// Vehicle-state → sensor-poller rate mapping. "parked" and
-// "ready-to-drive" are the only states with a downstream consumer
-// actively watching the live stream (Qt dashboard tilt indicator, alarm
-// classifier confirmation). Everything else (stand-by, shutting-down,
-// suspending, etc.) gets the slow heartbeat — the chip's own motion
-// engines handle wake-on-motion via the alarm-driven interrupt path,
-// so the host doesn't need a continuous stream.
+// Only parked and driving states need the live sensor stream; alarm wake uses
+// chip interrupts, so all other states use the low-rate heartbeat.
 const (
 	FastPollRateHz = 5
 	SlowPollRateHz = 1
 )
 
-// Subscriber watches the `alarm`, `power-manager`, and `vehicle` hashes
-// and reactively (a) reconfigures the BMX055 by deriving the appropriate
-// profile from the (alarm.status, power-manager.state) pair, and
-// (b) adjusts the sensor poller's cadence based on vehicle.state. Uses
-// redis-ipc HashWatcher with a 50 ms debounce so rapid status changes
-// don't thrash the chip.
 type Subscriber struct {
 	ipcClient  *ipc.Client
 	controller ProfileApplier
-	rate       RateSetter // optional; nil disables vehicle-state-driven rate
+	rate       RateSetter
 	log        *slog.Logger
 
 	alarmW   *ipc.HashWatcher
@@ -57,9 +42,6 @@ type Subscriber struct {
 	pmState     string
 }
 
-// NewSubscriber returns a Subscriber bound to the given redis-ipc client,
-// profile controller, and rate setter. `rate` may be nil to skip the
-// vehicle-state subscription.
 func NewSubscriber(ipcClient *ipc.Client, controller ProfileApplier, rate RateSetter, log *slog.Logger) *Subscriber {
 	return &Subscriber{
 		ipcClient:  ipcClient,
@@ -69,9 +51,8 @@ func NewSubscriber(ipcClient *ipc.Client, controller ProfileApplier, rate RateSe
 	}
 }
 
-// Start subscribes to both hashes. StartWithSync issues an HGETALL on each
-// so the very first apply reflects the current vehicle state, not just
-// future updates.
+// Start uses a 50 ms debounce so rapid alarm/power updates do not thrash chip
+// profiles; StartWithSync ensures the first profile reflects existing state.
 func (s *Subscriber) Start() error {
 	s.alarmW = s.ipcClient.NewHashWatcher("alarm")
 	s.alarmW.SetDebounce(50 * time.Millisecond)
@@ -109,7 +90,6 @@ func (s *Subscriber) Start() error {
 	return nil
 }
 
-// Stop tears down all watchers.
 func (s *Subscriber) Stop() {
 	if s.alarmW != nil {
 		if err := s.alarmW.Stop(); err != nil {
@@ -165,10 +145,9 @@ func (s *Subscriber) handleVehicleState(value string) error {
 	return nil
 }
 
+// A wedged hardware write must not block HashWatcher dispatch indefinitely.
 func (s *Subscriber) apply(p profile.Profile) error {
-	// Use a short timeout so a wedged chip-write doesn't stall the
-	// HashWatcher dispatch loop. The controller's Apply is normally
-	// well under a second.
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := s.controller.Apply(ctx, p); err != nil {

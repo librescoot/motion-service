@@ -20,11 +20,8 @@ const (
 	evdevEventSize = 16
 )
 
-// InterruptWatcher reads the gpio-keys input event device for a specific
-// keycode and publishes motion events the moment the BMX055 INT line rises,
-// clearing the latched interrupt on the chip side. Runs alongside
-// InterruptPoller — the watcher is the zero-latency primary path; the
-// poller is a slow-tick watchdog for any missed edges.
+// InterruptWatcher is the low-latency GPIO path; InterruptPoller is the
+// watchdog fallback for edges the evdev device misses.
 type InterruptWatcher struct {
 	devicePath string
 	keycode    uint16
@@ -36,8 +33,6 @@ type InterruptWatcher struct {
 	enabled atomic.Bool
 }
 
-// NewInterruptWatcher returns a watcher that opens devicePath and filters
-// for key-press events matching keycode.
 func NewInterruptWatcher(
 	devicePath string,
 	keycode uint16,
@@ -54,8 +49,7 @@ func NewInterruptWatcher(
 	}
 }
 
-// Open opens the input device. Returns an error if missing so the caller
-// can fall back to polling-only.
+// Open failure permits polling-only operation on hardware without this evdev node.
 func (w *InterruptWatcher) Open() error {
 	f, err := os.OpenFile(w.devicePath, os.O_RDONLY, 0)
 	if err != nil {
@@ -66,7 +60,6 @@ func (w *InterruptWatcher) Open() error {
 	return nil
 }
 
-// Close releases the input device and unblocks any outstanding read.
 func (w *InterruptWatcher) Close() {
 	if w.file != nil {
 		if err := w.file.Close(); err != nil {
@@ -77,20 +70,16 @@ func (w *InterruptWatcher) Close() {
 	}
 }
 
-// Enable starts publishing motion events for incoming edges.
 func (w *InterruptWatcher) Enable() {
 	w.enabled.Store(true)
 	w.log.Info("interrupt watcher enabled")
 }
 
-// Disable stops publishing motion events for incoming edges. The chip latch
-// is still cleared on each edge so the line returns to idle.
 func (w *InterruptWatcher) Disable() {
 	w.enabled.Store(false)
 	w.log.Info("interrupt watcher disabled")
 }
 
-// Run reads input events until ctx is cancelled or the device closes.
 func (w *InterruptWatcher) Run(ctx context.Context) {
 	w.log.Info("starting interrupt watcher")
 	defer w.Close()
@@ -131,9 +120,7 @@ func (w *InterruptWatcher) Run(ctx context.Context) {
 	}
 }
 
-// handleEdge reads INT_STATUS_0 to determine which engine fired,
-// publishes the MotionEvent, then clears the latch. Read-before-clear so
-// we can tell any-motion vs slow-motion in the published event.
+// Read status before clearing the latch so the public event retains its engine.
 func (w *InterruptWatcher) handleEdge(ctx context.Context) {
 	ts := time.Now().UnixMilli()
 

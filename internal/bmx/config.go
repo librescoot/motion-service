@@ -1,6 +1,5 @@
 package bmx
 
-// InterruptPin represents which interrupt pin to use
 type InterruptPin int
 
 const (
@@ -25,7 +24,6 @@ func (p InterruptPin) String() string {
 	}
 }
 
-// ParseInterruptPin parses a string to InterruptPin
 func ParseInterruptPin(s string) InterruptPin {
 	switch s {
 	case "int1":
@@ -41,20 +39,11 @@ func ParseInterruptPin(s string) InterruptPin {
 	}
 }
 
-// InterruptMode selects which BMX055 interrupt engine to use.
 type InterruptMode int
 
 const (
-	// InterruptModeAnyMotion uses the slope/any-motion engine (register 0x16).
-	// Fires when |accel[n] - accel[n-2]| exceeds threshold for N consecutive
-	// samples. Responsive to brief impacts — suitable for awake-armed
-	// alertness detection.
 	InterruptModeAnyMotion InterruptMode = iota
 
-	// InterruptModeSlowMotion uses the slow-motion engine (register 0x18).
-	// Fires when the slope exceeds threshold for N consecutive samples.
-	// Requires sustained movement — suitable for confirming deliberate
-	// manipulation in L1 / waiting states.
 	InterruptModeSlowMotion
 )
 
@@ -69,15 +58,13 @@ func (m InterruptMode) String() string {
 	}
 }
 
-// SensorConfig is the full hardware configuration for a detection profile.
 type SensorConfig struct {
 	Mode      InterruptMode
-	Bandwidth byte // PMU_BW register value
-	Threshold byte // 1 LSB = 3.91 mg in 2g range
-	Duration  byte // N = dur+1 consecutive samples must exceed threshold
+	Bandwidth byte
+	Threshold byte
+	Duration  byte
 }
 
-// Sensitivity represents motion detection sensitivity levels
 type Sensitivity int
 
 const (
@@ -99,7 +86,6 @@ func (s Sensitivity) String() string {
 	}
 }
 
-// ParseSensitivity parses a string to Sensitivity
 func ParseSensitivity(s string) Sensitivity {
 	switch s {
 	case "low":
@@ -113,7 +99,6 @@ func ParseSensitivity(s string) Sensitivity {
 	}
 }
 
-// GetThreshold returns the threshold value for a given sensitivity
 func (s Sensitivity) GetThreshold() byte {
 	switch s {
 	case SensitivityLow:
@@ -127,7 +112,6 @@ func (s Sensitivity) GetThreshold() byte {
 	}
 }
 
-// GetDuration returns the duration value for a given sensitivity
 func (s Sensitivity) GetDuration() byte {
 	return 0x01
 }

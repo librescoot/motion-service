@@ -11,16 +11,6 @@ import (
 	"github.com/librescoot/motion-service/internal/redis"
 )
 
-// InterruptPoller is the I2C-status watchdog: at a slow tick (1 s), it
-// reads INT_STATUS_0 and emits a MotionEvent if either the slope or
-// slow-no-motion engine has fired. Pairs with InterruptWatcher (evdev fast
-// path) — the watcher gets there first when the kernel notices the GPIO
-// edge; the poller catches anything the watcher missed.
-//
-// The poll tick is deliberately slow (1 s, not the original 100 ms): this
-// path only matters when the evdev watcher misses an edge, which doesn't
-// happen often enough to justify 10 Hz I2C traffic. A 1 s worst-case
-// detection delay is still comfortably below the alarm engine's hysteresis.
 type InterruptPoller struct {
 	accel     *bmx.Accelerometer
 	publisher *redis.Publisher
@@ -28,7 +18,6 @@ type InterruptPoller struct {
 	enabled   atomic.Bool
 }
 
-// NewInterruptPoller creates a new InterruptPoller.
 func NewInterruptPoller(
 	accel *bmx.Accelerometer,
 	publisher *redis.Publisher,
@@ -41,19 +30,16 @@ func NewInterruptPoller(
 	}
 }
 
-// Enable arms the poller. Events that arrive while disabled are dropped.
 func (p *InterruptPoller) Enable() {
 	p.enabled.Store(true)
 	p.log.Info("interrupt poller enabled")
 }
 
-// Disable stops the poller from publishing events.
 func (p *InterruptPoller) Disable() {
 	p.enabled.Store(false)
 	p.log.Info("interrupt poller disabled")
 }
 
-// Run polls until ctx is cancelled.
 func (p *InterruptPoller) Run(ctx context.Context) {
 	p.log.Info("starting interrupt poller")
 
@@ -76,8 +62,6 @@ func (p *InterruptPoller) Run(ctx context.Context) {
 	}
 }
 
-// checkInterrupt reads INT_STATUS_0, decides which engine fired, and
-// publishes a MotionEvent. Clears the latch afterwards.
 func (p *InterruptPoller) checkInterrupt(ctx context.Context) error {
 	status, err := p.accel.ReadByteData(bmx.ACCEL_INT_STATUS_0)
 	if err != nil {
@@ -113,9 +97,6 @@ func (p *InterruptPoller) checkInterrupt(ctx context.Context) error {
 	return nil
 }
 
-// engineNameFor returns the canonical engine string. If both bits are set
-// (a quick re-fire across the read window), prefer slope as it's the more
-// responsive engine.
 func engineNameFor(slope, slow bool) string {
 	if slope {
 		return "any-motion"

@@ -1,195 +1,115 @@
-# motion-service
+# Librescoot Motion Service
 
-Hardware abstraction service for the BMX055 9-axis sensor package on Librescoot.
+Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
-## Features
+## Overview
 
-- Direct I2C/SMBus communication with BMX055 sensors
-- Continuous sensor polling (10Hz default, configurable 1-100Hz)
-- Motion interrupt detection with three sensitivity presets
-- Redis interface for sensor data and command/control
-- Kernel driver management (automatic unbinding)
+`motion-service` owns the BMX055 IMU on a Librescoot vehicle. It reads accelerometer, gyroscope, and—when available—magnetometer data; publishes telemetry and motion interrupts through Redis/Valkey; and programs the sensor profile required by [`alarm-service`](../alarm-service/README.md) and power-manager state.
 
-## Architecture
+## Capabilities
 
-Three sensors in one package:
-- **BMA253** Accelerometer (0x18): 12-bit, ±2g
-- **BMG160** Gyroscope (0x68): 16-bit, ±2000°/s
-- **BMM150** Magnetometer (0x10): 13/15-bit
+- Direct I²C/SMBus access to the BMX055 accelerometer, gyroscope, and magnetometer, including release of the kernel drivers before use.
+- Continuous accelerometer/gyroscope telemetry and optional magnetometer/heading telemetry.
+- Motion interrupt detection through an evdev GPIO edge source when available, with I²C status polling as a fallback/watchdog.
+- Alarm- and hibernation-aware sensor profiles, with the applied register-derived state exposed in Redis.
+- A Redis RPC interface for hibernation preparation, diagnostics, telemetry rate, and streaming control.
+- `motion-calibrate`, a separate one-shot CSV capture utility for magnetometer calibration data.
 
-## Build
+## Operation and interfaces
 
-```bash
-make build          # ARM binary for target
-make build-amd64    # AMD64 binary
-```
+### Profiles and alarm relationship
 
-## Usage
+motion-service watches `alarm.status` and `power-manager.state` hashes. It owns the hardware configuration; alarm-service does not set sensor registers. The derived profiles are:
 
-```bash
-motion-service --i2c-bus=/dev/i2c-3 --redis=localhost:6379 --polling-rate=10
-```
-
-## Redis Interface
-
-### Published Data
-
-**Sensor readings** (`motion:sensors` channel, 10Hz):
-```json
-{
-  "timestamp": 1696089234567,
-  "accel": {"x": 0.278, "y": 0.021, "z": -0.944, "magnitude": 0.985, "unit": "g"},
-  "gyro": {"x": -0.4, "y": -3.4, "z": -3.8, "magnitude": 5.1, "unit": "deg/s"},
-  "mag": {"x": 10.5, "y": -15.2, "z": 8.6, "magnitude": 20.3, "unit": "uT"}
-}
-```
-
-**Magnetic heading** (`motion:heading` channel, 5Hz):
-```json
-{
-  "timestamp": 1696089234567,
-  "heading_deg": 127.4,
-  "heading_raw_deg": 128.1,
-  "accuracy_deg": 3.8,
-  "tilt_compensated": true,
-  "tilt_deg": 4.2,
-  "mag_strength_ut": 48.6,
-  "excess_g": 0.03,
-  "yaw_rate_dps": 1.7
-}
-```
-`accuracy_deg` is a heuristic that grows with tilt, non-gravity
-acceleration (`excess_g`), and yaw rate. `tilt_compensated` is `false`
-when the accelerometer is moving enough that it can't be trusted as a
-pure gravity vector (hard braking, big bumps); the heading then falls
-back to X/Y-only and accuracy is reported accordingly.
-
-**Interrupt events** (`motion:interrupt` PUBSUB + `motion:events` Stream)
-**Status** (`motion` hash). Heading-related fields:
-- `heading` (int, 0-359, legacy)
-- `heading-deg` (float, 0-360)
-- `heading-accuracy` (float, deg)
-- `heading-tilt` (float, deg)
-- `heading-tilt-comp` (`true`/`false`)
-
-### RPC (`motion:rpc`)
-
-Chip configuration is derived reactively from the `alarm` and
-`power-manager` hashes, so there is nothing to set by hand in normal
-operation. The RPC channel covers the synchronous cases:
-
-| method | request | what it does |
+| Profile | Selected when | Interrupt mode |
 |---|---|---|
-| `prepare-hibernation` | `{"profile":"armed-hibernation"}` | Applies the profile and returns once the registers are programmed. alarm-service calls this before releasing pm-service's suspend inhibitor. |
-| `get-calibration` | `{}` | Returns hard-iron offsets, axis remap and yaw offset. |
-| `clear-latch` | `{}` | Clears a stuck latched interrupt. |
-| `soft-reset` | `{}` | Resets accel + gyro, then reprograms the current profile so the chip does not sit at register defaults. |
-| `set-polling` | `{"rate_hz":10}` | Overrides the telemetry poll rate (1-100). The vehicle-state watcher re-derives the rate on the next `vehicle.state` change, so this does not stick. |
-| `set-streaming` | `{"enabled":false}` | Gates the `motion:sensors` stream. |
+| `idle` | any other alarm status | disabled |
+| `armed-awake` | `alarm.status=armed` outside hibernation states | any-motion, both interrupt pins |
+| `armed-hibernation` | `alarm.status=armed` while power-manager is hibernating or hibernation-imminent | any-motion, both interrupt pins |
+| `level1` | `alarm.status=level-1-triggered` | slow-motion, both interrupt pins |
+| `waiting` | `alarm.status=level-2-triggered` | slow-motion, INT1 |
 
-The `scooter:motion` command queue was removed. It had no producer other
-than hand-typed `redis-cli`, and its `sensitivity` / `pin` / `interrupt`
-commands wrote registers that the profile controller overwrote on the
-next alarm or power-manager transition, so a manual change silently
-reverted at an unpredictable moment. `reset` duplicated `soft-reset`.
-`polling` and `streaming` live on as the RPC methods above.
+Before hibernation, alarm-service calls `prepare-hibernation` on `motion:rpc`. That call applies and confirms `armed-hibernation`; it is the synchronization point between the two services. On startup, a latched motion interrupt is published as a `wake-hibernation` event and stored as `motion.wake-cause` for a consumer that starts later.
 
-## Profiles
+The service also watches `vehicle.state` to select the telemetry poll rate: 5 Hz for `parked` and `ready-to-drive`, and 1 Hz for other values. The process flag supplies the initial rate; the first vehicle state update can replace it.
 
-Sensitivity is a property of the applied profile, not a separate setting:
+### Redis/Valkey contract
 
-| profile | engine | threshold | interrupt |
-|---|---|---|---|
-| `idle` | slow-motion | 0x14 | off |
-| `armed-awake` | any-motion | 0x06 | INT1+INT2 |
-| `armed-hibernation` | slow-motion | 0x06 | INT1 |
+| Interface | Direction | Contract |
+|---|---|---|
+| `motion:sensors` | publishes | JSON `SensorReading`: millisecond `timestamp`; `accel` and `gyro` axes; optional `mag` axis. Axis objects contain `x`, `y`, `z`, `magnitude`, and `unit`. |
+| `motion:heading` | publishes | JSON heading with `heading_deg`, raw/fast/slow headings, `accuracy_deg`, `tilt_compensated`, `tilt_deg`, magnetic strength, excess acceleration, and yaw rate. |
+| `motion:interrupt` | publishes | JSON `{ "type": ..., "timestamp": ..., "engine": ... }`; alarm-service consumes this channel. |
+| `motion:ready` | publishes | Current millisecond timestamp after initialization. |
+| `motion` hash | publishes | Initialization/error fields; telemetry state; `current-profile`, `mode`, `bandwidth`, `threshold`, `duration`, `pin`, and `interrupt`; heading fields; and the one-shot `wake-cause` when applicable. |
+| `alarm` and `power-manager` hashes | watches | `status` and `state` determine the hardware profile. |
+| `vehicle` hash | watches | `state` determines telemetry rate. |
 
-`Derive(alarm.status, power-manager.state)` picks the profile. The
-`motion` hash reports the applied one in `current-profile`, alongside
-`mode`, `bandwidth`, `threshold`, `duration`, `pin` and `interrupt`,
-which describe what is actually in the chip's registers.
+Sensor telemetry streaming is enabled initially. `motion` hash status fields are state snapshots, not Pub/Sub notifications.
 
-## Deployment
+### RPC
 
-```bash
-make build
-scp bin/motion-service root@10.7.0.4:/usr/bin/
-ssh root@10.7.0.4 "systemctl daemon-reload && systemctl restart librescoot-motion"
+The `motion:rpc` request channel provides these methods:
+
+| Method | Request | Result |
+|---|---|---|
+| `prepare-hibernation` | `{ "profile": "armed-hibernation" }` (or empty profile) | Programs that profile and returns `programmed` and `profile`. Other profiles are rejected. |
+| `get-calibration` | `{}` | Returns hard-iron offsets, axis order/sign, and yaw offset. |
+| `clear-latch` | `{}` | Clears a latched accelerometer interrupt. |
+| `soft-reset` | `{}` | Resets accelerometer and gyroscope, then reapplies the current profile. |
+| `set-polling` | `{ "rate_hz": 1..100 }` | Sets both telemetry pollers and updates `motion.polling-rate-hz`. A later `vehicle.state` update re-derives the rate. |
+| `set-streaming` | `{ "enabled": true|false }` | Enables or disables `motion:sensors` publication and updates `motion.streaming`. |
+
+## Configuration
+
+The service is configured by command-line flags:
+
+```text
+--i2c-bus PATH          default /dev/i2c-3
+--redis ADDRESS         default localhost:6379
+--log-level LEVEL       debug, info, warn, or error
+--polling-rate HZ       initial rate; default 5
+--evdev-device PATH     default /dev/input/by-path/platform-gpio-keys-event
+--evdev-keycode CODE    default 0x2b
+--version
 ```
 
-## Magnetometer calibration capture
+Set `--evdev-device=` to disable evdev and use the I²C interrupt poller only. If the configured evdev device cannot be opened, the service logs a warning and continues with I²C polling.
 
-`motion-calibrate` is a one-shot diagnostic binary that captures raw
-magnetometer + accelerometer + gyroscope data to a CSV in `/data/`. Use
-it to derive hard-iron and (with enough orientation coverage) soft-iron
-calibration for a particular vehicle.
+## Build and test
 
-```bash
-make build
-scp bin/motion-calibrate systemd/motion-calibrate.service root@10.7.0.4:/data/
-ssh root@10.7.0.4 'cp /data/motion-calibrate /usr/bin/ \
-  && cp /data/motion-calibrate.service /etc/systemd/system/ \
-  && systemctl daemon-reload'
+Requires Go and the dependencies declared in `go.mod`.
+
+```sh
+make build          # static Linux ARMv7 binaries: bin/motion-service and bin/motion-calibrate
+make build-amd64    # AMD64 variants
+make test
+make lint           # requires golangci-lint
 ```
 
-The unit `Conflicts=` with `librescoot-alarm` and `librescoot-motion`, so
-starting it stops whichever is currently using the BMX055. On stop it
-brings `librescoot-alarm` back up via `systemctl --no-block start`.
+`make run`, `make dev-build`, `make fmt`, and `make clean` are also available.
 
-```bash
-# Start a capture (alarm-service stops automatically)
-ssh deep-blue systemctl start motion-calibrate
+## Deployment and runtime dependencies
 
-# ... rotate the scooter (driving a circle works for X/Y hard-iron) ...
+The Yocto package installs `/usr/bin/motion-service` and systemd unit `librescoot-motion.service`. The shipped unit starts after and wants `valkey.service`, runs as root, and uses `/dev/i2c-3`, `localhost:6379`, a 5 Hz initial poll rate, and `info` logging.
 
-# Stop the capture (alarm-service comes back up)
-ssh deep-blue systemctl stop motion-calibrate
+Runtime requirements are a supported BMX055 on the configured I²C bus, permission to unbind its kernel drivers, Redis/Valkey, and optionally the GPIO-key evdev device. alarm-service requires this service for normal motion alarm operation and hibernation preparation.
 
-# Output CSV is at /data/motion-cal-<unix-ts>.csv
-ssh deep-blue ls -lh /data/motion-cal-\*.csv
-```
+### Calibration utility
 
-Live progress is logged to journald every 2 seconds:
-```
-samples=80 rate_hz=19.9 x="[-27,-20] span=7" y="[53,70] span=17"
-  z="[101,107] span=6" hard_iron_xyz=[-23,61,104]
-```
+`motion-calibrate` takes exclusive ownership of the IMU and writes CSV samples. Its defaults are `/dev/i2c-3`, 20 Hz, `highacc` magnetometer preset, and output `/data/bmx-cal-<unix>.csv`. Use its `--output`, `--rate`, `--duration`, `--preset`, and `--progress-every` flags as needed.
 
-A high-quality hard-iron capture should produce X and Y spans of
-roughly 2 × Earth's horizontal field (≈ ±480 LSB peak-to-peak in
-Berlin, so a span around 950 LSB after a full 360° rotation).
+The Yocto recipe installs only `motion-service`; build and deploy `motion-calibrate` and its source unit file manually when calibration is required. The provided `systemd/motion-calibrate.service` conflicts with `librescoot-alarm.service` and `librescoot-motion.service`, stopping them before capture. On stop it starts `librescoot-alarm.service` asynchronously. Invoke it manually with `systemctl start motion-calibrate.service`; it is not enabled for boot.
 
-CSV columns:
-```
-timestamp_ms, mag_raw_x, mag_raw_y, mag_raw_z, mag_rhall, mag_drdy,
-mag_comp_x, mag_comp_y, mag_comp_z, ax_g, ay_g, az_g,
-gx_dps, gy_dps, gz_dps
-```
+## Operational and security notes
 
-Raw values are int16 ADC outputs (13-bit X/Y, 15-bit Z) — these are
-what an offline ellipsoid fit operates on. Compensated values are in
-1/16 µT/LSB (480 LSB ≈ 30 µT) and shown for sanity-checking the
-chip's response.
-
-## Testing
-
-```bash
-# Monitor sensor data
-redis-cli -h 10.7.0.4 SUBSCRIBE motion:sensors
-
-# Test motion detection. The chip is armed by the alarm hash, not by hand:
-redis-cli -h 10.7.0.4 HGET motion current-profile   # expect armed-awake when armed
-redis-cli -h 10.7.0.4 SUBSCRIBE motion:interrupt
-# Shake the scooter - should see interrupt events
-```
+- Do not run motion-service, alarm-service versions that own the IMU, or motion-calibrate concurrently outside the supplied systemd conflict handling. Concurrent I²C access can invalidate sensor configuration and capture data.
+- The service resets and reprograms the sensor whenever its profile changes. Use the published `motion.current-profile` and associated fields to diagnose the actual applied configuration rather than attempting manual register writes.
+- Redis/Valkey controls sensor state and exposes vehicle motion data without authentication or TLS in this service. Restrict it to trusted local clients.
+- Calibration output and raw sensor data can reveal vehicle movement. Protect files under `/data` appropriately.
 
 ## License
 
-This project is dual-licensed. The source code is available under the
-[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License][cc-by-nc-sa].
-The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
+This project is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE).
 
-[![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
-
-[cc-by-nc-sa]: http://creativecommons.org/licenses/by-nc-sa/4.0/
-[cc-by-nc-sa-image]: https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png
+Made with ❤️ by the Librescoot community

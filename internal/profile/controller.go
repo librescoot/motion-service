@@ -10,38 +10,28 @@ import (
 	"github.com/librescoot/motion-service/internal/bmx"
 )
 
-// InterruptSource is something that can be gated in lockstep with chip
-// reconfiguration — both the I2C poller and the evdev watcher implement it.
 type InterruptSource interface {
 	Enable()
 	Disable()
 }
 
-// Publisher is the subset of redis.Publisher the controller needs for
-// status reporting. Defined here to keep the controller package free of
-// its own redis import dependency cycle.
 type Publisher interface {
 	UpdateStatusField(ctx context.Context, field, value string) error
 }
 
-// Controller owns the BMX055 chip configuration. It applies profiles
-// idempotently (re-applying the same profile is a no-op) and keeps the
-// poller + watcher gated in lockstep with the engine state.
 type Controller struct {
 	accel     *bmx.Accelerometer
 	gyro      *bmx.Gyroscope
 	poller    InterruptSource
-	watcher   InterruptSource // nil if the evdev device wasn't available at startup
+	watcher   InterruptSource
 	publisher Publisher
 	log       *slog.Logger
 
 	mu       sync.Mutex
 	current  Profile
-	hasFirst bool // true once any profile has been applied at least once
+	hasFirst bool
 }
 
-// New returns a Controller. watcher may be nil — the I2C poller alone is
-// sufficient on hardware where the gpio-keys evdev device isn't wired up.
 func New(accel *bmx.Accelerometer, gyro *bmx.Gyroscope, poller InterruptSource, watcher InterruptSource, publisher Publisher, log *slog.Logger) *Controller {
 	return &Controller{
 		accel:     accel,
@@ -53,40 +43,22 @@ func New(accel *bmx.Accelerometer, gyro *bmx.Gyroscope, poller InterruptSource, 
 	}
 }
 
-// Current returns the most recently applied profile. Returns Idle if no
-// profile has been applied yet.
 func (c *Controller) Current() Profile {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.current
 }
 
-// Invalidate drops the cached profile so the next Apply reprograms the
-// chip even if the profile is unchanged. Anything that writes the chip's
-// registers behind the controller's back must call this, otherwise the
-// idempotence check below skips the re-apply and the chip is left in
-// whatever state that write produced. Soft reset is the case that
-// matters: it wipes the motion engine, and on an armed scooter a skipped
-// re-apply means no motion detection until the profile happens to change.
+// Invalidate is required after an out-of-band register write (especially reset),
+// otherwise idempotence would leave an armed chip with motion detection erased.
 func (c *Controller) Invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.hasFirst = false
 }
 
-// Apply reconfigures the chip for the given profile. Soft-reset → set
-// bandwidth → configure motion engine → 100 ms settle + double-clear-latch
-// → map to INT pins → enable interrupt sources. Idempotent — re-applying
-// the same profile is a no-op once it has been applied, unless
-// Invalidate has been called since.
-//
-// The 100 ms settle window is load-bearing: the bandwidth change kicks off
-// a low-pass filter settle that can produce a transient slope large enough
-// to set the status bit. If the pin mapping is in place during that
-// transient, the INT line spikes from a stale status bit and the gpio-keys
-// edge fires before the status is cleared — false wake + the real first
-// edge gets hidden. Clear twice across the settle delay BEFORE adding the
-// engine to the pin map.
+// Apply gates both interrupt sources while reset, engine configuration, and pin
+// routing are in flight; only a fully configured profile may publish edges.
 func (c *Controller) Apply(ctx context.Context, p Profile) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -107,17 +79,12 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 		"enable", spec.EnableInterrupt,
 	)
 
-	// Disable poller + watcher before reconfiguring so they don't observe
-	// transient INT activity from the bandwidth-settle period.
+	// Prevent reset and filter-settle transients from becoming motion events.
 	c.poller.Disable()
 	if c.watcher != nil {
 		c.watcher.Disable()
 	}
 
-	// Step 1: soft-reset both accel and gyro. Gyro reset verifies chip
-	// responsiveness itself (see Gyroscope.SoftReset) and its chip-ID poll
-	// waits >= 10 ms, which also covers the accel's ~2 ms restart before
-	// the reconfiguration below.
 	if err := c.accel.SoftReset(); err != nil {
 		return fmt.Errorf("accel soft reset: %w", err)
 	}
@@ -125,19 +92,15 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 		return fmt.Errorf("gyro soft reset: %w", err)
 	}
 
-	// Step 1b: re-apply the gyro config the soft reset wiped (range/filter).
-	// Otherwise ReadDataInDPS's ±500°/s scale no longer matches the chip's
-	// default ±2000°/s and gyro rates read 4x too small.
+	// Reset restores ±2000°/s defaults, not the reader's configured scale.
 	if err := c.gyro.Configure(); err != nil {
 		return fmt.Errorf("configure gyro: %w", err)
 	}
 
-	// Step 2: bandwidth.
 	if err := c.accel.SetBandwidth(spec.Sensor.Bandwidth); err != nil {
 		return fmt.Errorf("set bandwidth: %w", err)
 	}
 
-	// Step 3: configure the active engine, disable the other one.
 	switch spec.Sensor.Mode {
 	case bmx.InterruptModeAnyMotion:
 		if err := c.accel.DisableSlowNoMotionInterrupt(); err != nil {
@@ -155,23 +118,22 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 		}
 	}
 
-	// Step 4: pin output config (active-high, latched).
 	if spec.InterruptPin != bmx.InterruptPinNone {
 		if err := c.accel.ConfigureInterruptPins(spec.InterruptPin, true); err != nil {
 			return fmt.Errorf("configure interrupt pins: %w", err)
 		}
 	}
 
-	// Step 5: 100 ms settle + double-clear-latch.
+	// Clear before and after the 100 ms bandwidth/filter settle period.
 	if err := c.accel.ClearLatchedInterrupt(); err != nil {
 		c.log.Warn("first latch-clear failed", "error", err)
 	}
+	// The accelerometer can reassert a latch while its reset settles.
 	time.Sleep(100 * time.Millisecond)
 	if err := c.accel.ClearLatchedInterrupt(); err != nil {
 		c.log.Warn("second latch-clear failed", "error", err)
 	}
 
-	// Step 6: route the engine to the configured pin (or disable mapping).
 	if spec.EnableInterrupt {
 		switch spec.Sensor.Mode {
 		case bmx.InterruptModeAnyMotion:
@@ -192,7 +154,6 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 		}
 	}
 
-	// Step 7: re-arm poller + watcher only if interrupt is enabled.
 	if spec.EnableInterrupt {
 		c.poller.Enable()
 		if c.watcher != nil {
@@ -203,10 +164,7 @@ func (c *Controller) Apply(ctx context.Context, p Profile) error {
 	c.current = p
 	c.hasFirst = true
 
-	// Report what is actually in the chip's registers. These fields used
-	// to be written only by the manual scooter:motion commands, so they
-	// drifted the moment a profile was applied and ended up claiming
-	// interrupts were disabled on a chip that had them armed.
+	// Report register reality, not stale manual-command state.
 	if c.publisher != nil {
 		for field, value := range map[string]string{
 			"current-profile": p.String(),

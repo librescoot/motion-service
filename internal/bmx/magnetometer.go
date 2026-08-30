@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// TrimData holds the BMM150 temperature compensation trim values
 type TrimData struct {
 	digX1   int8
 	digY1   int8
@@ -21,82 +20,29 @@ type TrimData struct {
 	digXYZ1 uint16
 }
 
-// Calibration holds runtime-tunable magnetometer calibration plus the
-// vehicle-frame Orientation that's shared with the accel/gyro readers.
-//
-// HardIronOffset is in chip-native compensated LSB units (1/16 µT/LSB)
-// in SENSOR frame — capture by rotating the vehicle 360° in place and
-// taking (max+min)/2 per axis from bmx-calibrate's CSV.
-//
-// Orientation maps sensor frame to vehicle NED (X-forward, Y-right,
-// Z-down). YawOffsetDeg is added to the final compass heading to align
-// with magnetic North after the orientation transform.
 type Calibration struct {
 	HardIronOffset [3]int16
 	Orientation    Orientation
 	YawOffsetDeg   float64
 }
 
-// DefaultCalibration is the empirical calibration captured on Deep Blue.
-// Other vehicles will need their own values — run bmx-calibrate, drive a
-// few circles, and use the JSON summary to set HardIronOffset.
-//
-// HardIronOffset refined 2026-04-30 from a 4726-sample sphere fit over
-// the original calibration captures (CW + CCW circles + figure-8s).
-// Sphere fit beats per-axis min/max midpoint when the rotation pattern
-// doesn't fully separate Z hard iron from Earth's vertical projection —
-// the multi-axis residual minimization couples the constraints.
-//
-// Sphere-fit radius came out at ~14 µT vs Berlin's 49.5 µT total field;
-// the trace is significantly non-spherical (soft iron from the steel
-// chassis sheet beneath the sensor compresses the field along Z). For a
-// fully linear heading response this would benefit from an ellipsoid
-// fit, but the sphere-fit center alone is a defensible hard iron.
-//
-// Orientation derived from gyro observation on the bmx-debug screen:
-// chip +Y aligns with vehicle forward, chip +X with vehicle right, chip
-// +Z with vehicle down (chip is mounted face-down on the PCB underside,
-// which makes its package-top-out direction point into the chassis).
-//
-// YawOffsetDeg derived from a known-North check on Deep Blue: with the
-// scooter approximately facing magnetic North, the unrotated heading
-// read 253°, so we add 107° to bring 253 → 360 (= 0). Approximate; will
-// refine after the next calibration run captures a clean known-North
-// reference.
+// Device-specific mounting calibration.
 var DefaultCalibration = Calibration{
 	HardIronOffset: [3]int16{13, 339, 989},
 	Orientation: Orientation{
-		// AxisOrder=[1,0,2]: vehicle X comes from sensor Y, vehicle Y
-		// from sensor X, vehicle Z from sensor Z. The chip is rotated
-		// 90° on the PCB so its +Y axis points to the vehicle's rear
-		// and its +X axis to the vehicle's right — confirmed by the
-		// gyro response to lean and pitch.
-		// AxisSign=[-1,+1,+1]:
-		//   Lean LEFT → sensor.gy > 0. In NED, lean LEFT is ω_x < 0
-		//     (positive ω_x by right-hand rule rolls top to the right).
-		//     With chip +Y pointing rearward (= -vehicle X), sensor.gy
-		//     = -ω_x > 0 ✓. Mapping: vehicle.x = -1 * sensor.y.
-		//   Pitch UP → sensor.gx > 0. In NED, pitch UP is ω_y > 0
-		//     (right-hand rule: thumb +Y/right, curl from +Z/down to
-		//     +X/forward — the body's down tips toward forward = nose
-		//     up). With chip +X pointing to vehicle +Y (right),
-		//     sensor.gx = +ω_y. Mapping: vehicle.y = +1 * sensor.x.
-		//   Accel sensor.z ≈ -1 g at rest → chip +Z already aligned
-		//     with NED +Z (down). vehicle.z = +1 * sensor.z.
+
 		AxisOrder: [3]int{1, 0, 2},
 		AxisSign:  [3]float64{-1, 1, 1},
 	},
 	YawOffsetDeg: 107,
 }
 
-// Magnetometer represents the BMX055 magnetometer
 type Magnetometer struct {
 	*i2cDevice
 	trimData    TrimData
 	calibration Calibration
 }
 
-// NewMagnetometer creates and initializes the magnetometer
 func NewMagnetometer(bus string) (*Magnetometer, error) {
 	dev, err := openI2C(bus, BMX055_MAG_ADDR)
 	if err != nil {
@@ -106,15 +52,14 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 
 	mag := &Magnetometer{i2cDevice: dev, calibration: DefaultCalibration}
 
-	// Enable power control bit (equivalent to bmm050_init power enable)
 	if err := mag.WriteByteData(MAG_POWER_CTRL, 0x01); err != nil {
 		_ = mag.Close()
 		return nil, fmt.Errorf("failed to enable magnetometer power: %w", err)
 	}
 
+	// BMM150 needs a power-on delay before its chip ID is readable.
 	time.Sleep(5 * time.Millisecond)
 
-	// Verify chip ID
 	chipID, err := mag.ReadByteData(MAG_CHIP_ID_REG)
 	if err != nil {
 		_ = mag.Close()
@@ -126,9 +71,6 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 		return nil, fmt.Errorf("invalid magnetometer chip ID: 0x%02X (expected 0x32)", chipID)
 	}
 
-	// Apply Regular preset (9 XY reps / 15 Z reps) — datasheet ±2.5° heading
-	// accuracy is specified for this preset, not for the power-on default of
-	// 1 rep which is loud enough to be unusable as a compass.
 	if err := mag.WriteByteData(MAG_REPXY, MAG_REPXY_REGULAR); err != nil {
 		_ = mag.Close()
 		return nil, fmt.Errorf("failed to set magnetometer REPXY: %w", err)
@@ -138,16 +80,12 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 		return nil, fmt.Errorf("failed to set magnetometer REPZ: %w", err)
 	}
 
-	// Normal mode @ 10 Hz ODR. Datasheet pairs the Regular preset with 10 Hz;
-	// running at 30 Hz with only 1 rep (the prior config) gave more samples
-	// of noisier data than is useful.
 	opmodeOdr := byte(MAG_OPMODE_NORMAL | MAG_ODR_10HZ)
 	if err := mag.WriteByteData(MAG_OPMODE_ODR, opmodeOdr); err != nil {
 		_ = mag.Close()
 		return nil, fmt.Errorf("failed to set magnetometer operation mode: %w", err)
 	}
 
-	// Read trim data for temperature compensation
 	if err := mag.readTrimData(); err != nil {
 		_ = mag.Close()
 		return nil, fmt.Errorf("failed to read magnetometer trim data: %w", err)
@@ -156,39 +94,33 @@ func NewMagnetometer(bus string) (*Magnetometer, error) {
 	return mag, nil
 }
 
-// readTrimData reads the trim registers for temperature compensation
 func (m *Magnetometer) readTrimData() error {
 	var err error
 
-	// Read dig_x1
 	val, err := m.ReadByteData(MAG_DIG_X1)
 	if err != nil {
 		return err
 	}
 	m.trimData.digX1 = int8(val)
 
-	// Read dig_y1
 	val, err = m.ReadByteData(MAG_DIG_Y1)
 	if err != nil {
 		return err
 	}
 	m.trimData.digY1 = int8(val)
 
-	// Read dig_x2
 	val, err = m.ReadByteData(MAG_DIG_X2)
 	if err != nil {
 		return err
 	}
 	m.trimData.digX2 = int8(val)
 
-	// Read dig_y2
 	val, err = m.ReadByteData(MAG_DIG_Y2)
 	if err != nil {
 		return err
 	}
 	m.trimData.digY2 = int8(val)
 
-	// Read dig_z1 (16-bit)
 	lsb, err := m.ReadByteData(MAG_DIG_Z1_LSB)
 	if err != nil {
 		return err
@@ -199,7 +131,6 @@ func (m *Magnetometer) readTrimData() error {
 	}
 	m.trimData.digZ1 = uint16(msb)<<8 | uint16(lsb)
 
-	// Read dig_z2 (16-bit signed)
 	lsb, err = m.ReadByteData(MAG_DIG_Z2_LSB)
 	if err != nil {
 		return err
@@ -210,7 +141,6 @@ func (m *Magnetometer) readTrimData() error {
 	}
 	m.trimData.digZ2 = int16(uint16(msb)<<8 | uint16(lsb))
 
-	// Read dig_z3 (16-bit signed)
 	lsb, err = m.ReadByteData(MAG_DIG_Z3_LSB)
 	if err != nil {
 		return err
@@ -221,7 +151,6 @@ func (m *Magnetometer) readTrimData() error {
 	}
 	m.trimData.digZ3 = int16(uint16(msb)<<8 | uint16(lsb))
 
-	// Read dig_z4 (16-bit signed)
 	lsb, err = m.ReadByteData(MAG_DIG_Z4_LSB)
 	if err != nil {
 		return err
@@ -232,21 +161,18 @@ func (m *Magnetometer) readTrimData() error {
 	}
 	m.trimData.digZ4 = int16(uint16(msb)<<8 | uint16(lsb))
 
-	// Read dig_xy1
 	val, err = m.ReadByteData(MAG_DIG_XY1)
 	if err != nil {
 		return err
 	}
 	m.trimData.digXY1 = uint8(val)
 
-	// Read dig_xy2
 	val, err = m.ReadByteData(MAG_DIG_XY2)
 	if err != nil {
 		return err
 	}
 	m.trimData.digXY2 = int8(val)
 
-	// Read dig_xyz1 (16-bit)
 	lsb, err = m.ReadByteData(MAG_DIG_XYZ1_LSB)
 	if err != nil {
 		return err
@@ -260,14 +186,7 @@ func (m *Magnetometer) readTrimData() error {
 	return nil
 }
 
-// compensateX applies temperature compensation to X-axis magnetometer data.
-// All intermediates are int64 — the equivalent C formula overflows int32
-// for typical earth-field readings (mag * inner ≈ 6e10 with normal trim
-// values, exceeding the int32 range).
-//
-// Output is in 1/16 µT per LSB, so a 30 µT field yields ≈ 480 LSB. This
-// is the scale used downstream in ReadDataInMicroTesla (which divides by
-// 16) and matches the convention of the Linux IIO magnetometer drivers.
+// Compensation follows the BMM150 trim formula and returns 1/16 µT units.
 func (m *Magnetometer) compensateX(magDataX int16, dataRhall uint16) int16 {
 	if magDataX == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL ||
 		dataRhall == 0 || m.trimData.digXYZ1 == 0 {
@@ -281,9 +200,6 @@ func (m *Magnetometer) compensateX(magDataX int16, dataRhall uint16) int16 {
 	return int16((int64(magDataX)*inner)>>13 + int64(m.trimData.digX1)<<3)
 }
 
-// compensateY applies temperature compensation to Y-axis magnetometer data.
-// Same structure as compensateX with digY1/digY2 substituted; digXY1/XY2
-// are shared cross-axis trim values.
 func (m *Magnetometer) compensateY(magDataY int16, dataRhall uint16) int16 {
 	if magDataY == BMM150_XYAXES_FLIP_OVERFLOW_ADCVAL ||
 		dataRhall == 0 || m.trimData.digXYZ1 == 0 {
@@ -297,12 +213,7 @@ func (m *Magnetometer) compensateY(magDataY int16, dataRhall uint16) int16 {
 	return int16((int64(magDataY)*inner)>>13 + int64(m.trimData.digY1)<<3)
 }
 
-// compensateZ applies temperature compensation to Z-axis magnetometer data.
-// The Z formula is structurally different from X/Y — it uses dig_z1..dig_z4
-// and digXYZ1, with a denominator built from dig_z1 * rhall. int64 math
-// throughout to avoid the int32 overflow in (mag - dig_z4) << 15 * 1000.
-//
-// Output is in 1/16 µT per LSB, matching X/Y.
+// Z uses the distinct trim formula; int64 math avoids intermediate overflow.
 func (m *Magnetometer) compensateZ(magDataZ int16, dataRhall uint16) int16 {
 	if magDataZ == BMM150_ZAXIS_HALL_OVERFLOW_ADCVAL ||
 		m.trimData.digZ2 == 0 || m.trimData.digZ1 == 0 ||
@@ -316,9 +227,7 @@ func (m *Magnetometer) compensateZ(magDataZ int16, dataRhall uint16) int16 {
 	num := a - b
 
 	inner := (int64(m.trimData.digZ1)*int64(int16(dataRhall))<<1 + 1<<15) >> 16
-	// int16 truncation mirrors the C reference. For typical trim/rhall
-	// pairs the value fits, so this is a no-op; for pathological inputs
-	// it wraps the way the C code does.
+
 	den := int64(m.trimData.digZ2) + int64(int16(inner))
 	if den == 0 {
 		return BMM150_OVERFLOW_OUTPUT
@@ -334,17 +243,10 @@ func (m *Magnetometer) compensateZ(magDataZ int16, dataRhall uint16) int16 {
 	return int16(out)
 }
 
-// ReadRaw reads the magnetometer's pre-compensation 13/15-bit ADC outputs
-// plus the 14-bit Hall resistance value and the data-ready flag. Use this
-// for calibration capture — it's the chip output before any temperature
-// compensation, which is what offline ellipsoid fits operate on.
-//
-// drdy is true if the chip reports that this sample is fresh (DRDY bit in
-// register 0x48). Polling faster than ODR will return drdy=false on the
-// repeat reads.
+// ReadRaw returns uncompensated 13/15-bit ADC values, 14-bit Hall resistance,
+// and DRDY. Calibration capture needs this pre-correction chip output.
 func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err error) {
-	// Data + RHALL live at 0x42..0x49, eight contiguous bytes — one SMBus
-	// I2C_BLOCK ioctl gets the lot.
+
 	buf, e := m.ReadBlockData(MAG_DATAX_LSB, 8)
 	if e != nil {
 		err = e
@@ -359,7 +261,6 @@ func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err er
 	zLSB, zMSB := buf[4], buf[5]
 	rhallLSB, rhallMSB := buf[6], buf[7]
 
-	// X/Y are 13-bit signed: 5 bits in LSB[7:3], 8 bits in MSB[7:0].
 	xRaw := (uint16(xMSB) << 5) | (uint16(xLSB) >> 3)
 	yRaw := (uint16(yMSB) << 5) | (uint16(yLSB) >> 3)
 	if xRaw&0x1000 != 0 {
@@ -369,23 +270,17 @@ func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err er
 		yRaw |= 0xE000
 	}
 
-	// Z is 15-bit signed: 7 bits in LSB[7:1], 8 bits in MSB[7:0].
 	zRaw := (uint16(zMSB) << 7) | (uint16(zLSB) >> 1)
 	if zRaw&0x4000 != 0 {
 		zRaw |= 0x8000
 	}
 
-	// RHALL is 14-bit unsigned: 6 bits in LSB[7:2], 8 bits in MSB[7:0].
-	// LSB bit 0 is the data-ready status.
 	rhall = (uint16(rhallMSB) << 6) | (uint16(rhallLSB) >> 2)
 	drdy = rhallLSB&0x01 != 0
 
 	return int16(xRaw), int16(yRaw), int16(zRaw), rhall, drdy, nil
 }
 
-// ReadData reads the magnetometer's data registers and returns
-// temperature-compensated values in chip "1/16 µT" units. For calibration
-// capture use ReadRaw instead.
 func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
 	rawX, rawY, rawZ, rhall, _, err := m.ReadRaw()
 	if err != nil {
@@ -397,40 +292,24 @@ func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
 		nil
 }
 
-// SetCalibration replaces the runtime calibration used by ReadDataInMicroTesla
-// and the heading calculations. Safe to call at any time.
 func (m *Magnetometer) SetCalibration(cal Calibration) {
 	m.calibration = cal
 }
 
-// Calibration returns the current runtime calibration.
 func (m *Magnetometer) Calibration() Calibration {
 	return m.calibration
 }
 
-// raw LSB → µT scale factor (per Bosch BMM150 reference).
+// Compensated BMM150 LSB values are 1/16 µT.
 const magScaleUT = 16.0
 
-// ReadDataInMicroTesla reads the magnetometer in vehicle-frame µT.
-// Hard-iron is subtracted in the sensor frame (in raw 1/16 µT/LSB units)
-// before the orientation transform permutes/sign-flips into vehicle NED
-// and divides through by magScaleUT.
 func (m *Magnetometer) ReadDataInMicroTesla() (vx, vy, vz, magnitude float64, err error) {
 	_, _, _, vx, vy, vz, magnitude, _, err = m.ReadAll()
 	return
 }
 
-// ReadAll reads the magnetometer's data registers once and returns both
-// representations of the same sample: the temperature-compensated sensor-
-// frame int16 triple (what ReadData returns), and the calibrated vehicle-
-// frame µT triple plus magnitude (what ReadDataInMicroTesla returns). One
-// I2C block read instead of two.
-//
-// Use this from the magnetometer-heavy path (mag_poller) where both forms
-// were previously fetched via back-to-back ReadData + ReadDataInMicroTesla
-// calls. drdy reports whether the chip flagged this sample as fresh —
-// polling faster than the configured ODR returns drdy=false on the
-// repeated reads.
+// ReadAll supplies both chip-frame compensated values and calibrated vehicle-frame
+// µT from one I²C transfer; DRDY is false when polling faster than ODR.
 func (m *Magnetometer) ReadAll() (compX, compY, compZ int16, vx, vy, vz, magnitude float64, drdy bool, err error) {
 	rawX, rawY, rawZ, rhall, d, e := m.ReadRaw()
 	if e != nil {
@@ -454,26 +333,17 @@ func (m *Magnetometer) ReadAll() (compX, compY, compZ int16, vx, vy, vz, magnitu
 	return
 }
 
-// Orientation returns the orientation portion of the current calibration,
-// for sharing with the accel/gyro vehicle-frame readers.
 func (m *Magnetometer) Orientation() Orientation {
 	return m.calibration.Orientation
 }
 
-// HeadingFromVector computes a compass heading (0-360°, 0=North, 90=East)
-// from a vehicle-frame mag vector with optional roll/pitch tilt compensation.
-//
-// Pass roll/pitch in radians. Pass NaN for either to skip tilt compensation
-// (X/Y-only heading, valid only when the sensor is near horizontal).
 func (m *Magnetometer) HeadingFromVector(magX, magY, magZ, rollRad, pitchRad float64) float64 {
 	var bx, by float64
 	if math.IsNaN(rollRad) || math.IsNaN(pitchRad) {
 		bx = magX
 		by = magY
 	} else {
-		// Project the magnetic vector onto the horizontal plane.
-		// Standard NED-frame tilt compensation; signs follow vehicle frame
-		// (X forward, Y left, Z up) which the AxisSign step produces.
+
 		sr, cr := math.Sincos(rollRad)
 		sp, cp := math.Sincos(pitchRad)
 		bx = magX*cp + magY*sp*sr + magZ*sp*cr
@@ -486,9 +356,6 @@ func (m *Magnetometer) HeadingFromVector(magX, magY, magZ, rollRad, pitchRad flo
 	return angleDeg
 }
 
-// ReadHeading reads magnetometer data and returns a non-tilt-compensated
-// compass heading. Retained for callers that don't have an accelerometer
-// available; prefer ComputeTiltCompensatedHeading where possible.
 func (m *Magnetometer) ReadHeading() (heading float64, err error) {
 	x, y, z, _, err := m.ReadDataInMicroTesla()
 	if err != nil {
