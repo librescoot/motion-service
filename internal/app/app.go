@@ -2,8 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +14,7 @@ import (
 	ipc "github.com/librescoot/redis-ipc"
 
 	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/calibration"
 	"github.com/librescoot/motion-service/internal/driver"
 	"github.com/librescoot/motion-service/internal/poller"
 	"github.com/librescoot/motion-service/internal/profile"
@@ -30,13 +34,14 @@ type Config struct {
 
 // App represents the motion-service application
 type App struct {
-	cfg       *Config
-	log       *slog.Logger
-	ipcClient *ipc.Client
-	publisher *redis.Publisher
-	accel     *bmx.Accelerometer
-	gyro      *bmx.Gyroscope
-	mag       *bmx.Magnetometer
+	cfg                  *Config
+	log                  *slog.Logger
+	ipcClient            *ipc.Client
+	publisher            *redis.Publisher
+	accel                *bmx.Accelerometer
+	gyro                 *bmx.Gyroscope
+	mag                  *bmx.Magnetometer
+	calibrationCollector *calibration.Collector
 
 	sensorPoller     *poller.SensorPoller
 	interruptPoller  *poller.InterruptPoller
@@ -91,6 +96,24 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	defer a.closeSensors()
 
+	if a.mag != nil {
+		modelPath := filepath.Join("/data", calibration.ModelFilename)
+		model, err := calibration.LoadModel(modelPath)
+		switch {
+		case err == nil:
+			a.applyMagCalibration(&model)
+			a.log.Info("loaded planar magnetometer calibration", "path", modelPath,
+				"residual_rms", model.ResidualRMS, "condition", model.Condition)
+		case errors.Is(err, os.ErrNotExist):
+			a.applyMagCalibration(nil)
+			a.log.Warn("no per-vehicle magnetometer calibration; heading disabled")
+		default:
+			a.applyMagCalibration(nil)
+			a.log.Error("invalid magnetometer calibration; heading disabled",
+				"path", modelPath, "error", err)
+		}
+	}
+
 	if err := a.publishInitialStatus(ctx); err != nil {
 		a.log.Warn("failed to publish initial status", "error", err)
 	}
@@ -105,10 +128,12 @@ func (a *App) Run(ctx context.Context) error {
 	go a.sensorPoller.Run(ctx)
 
 	if a.mag != nil {
+		a.calibrationCollector = calibration.NewCollector("/data", a.applyMagCalibration)
 		// Match mag_poller's initial rate to sensor_poller's so both
 		// pollers come up at the same cadence; the subscriber will
 		// re-set both in unison when vehicle:state arrives.
-		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher, sensorCache, a.cfg.PollingRate, a.log)
+		a.magPoller = poller.NewMagPoller(a.mag, a.accel, a.gyro, a.publisher,
+			sensorCache, a.calibrationCollector, a.cfg.PollingRate, a.log)
 		go a.magPoller.Run(ctx)
 	}
 
@@ -172,8 +197,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.subscriber.Stop()
 
 	// Register RPC handlers (prepare-hibernation, get-calibration, ...)
-	a.rpcServer = rpcpkg.New(a.ipcClient, a.controller, a.accel, a.gyro,
-		pollerGroup{a.sensorPoller, a.magPoller}, a.sensorPoller, a.publisher, a.log)
+	a.rpcServer = rpcpkg.New(a.ipcClient, a.controller, a.accel, a.gyro, a.mag,
+		pollerGroup{a.sensorPoller, a.magPoller}, a.sensorPoller,
+		a.calibrationCollector, a.publisher, a.log)
 	a.rpcServer.Start()
 	defer a.rpcServer.Stop()
 
@@ -184,6 +210,20 @@ func (a *App) Run(ctx context.Context) error {
 	<-ctx.Done()
 	a.log.Info("shutting down")
 	return nil
+}
+
+func (a *App) applyMagCalibration(model *calibration.PlanarModel) {
+	if a.mag == nil {
+		return
+	}
+	cal := bmx.DefaultCalibration
+	if model != nil {
+		cal.HardIronOffset[0] = model.Offset[0]
+		cal.HardIronOffset[1] = model.Offset[1]
+		cal.SoftIronXY = model.Matrix
+		cal.State = "calibrated"
+	}
+	a.mag.SetCalibration(cal)
 }
 
 // splitHostPort splits "host:port" with a sensible default port if absent.

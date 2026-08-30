@@ -25,17 +25,24 @@ type MotionEvent struct {
 }
 
 // HeadingReading is the motion:heading contract. HeadingDeg is the medium EMA;
-// consumers should use AccuracyDeg and quality fields rather than treat it as exact.
+// HeadingValid is authoritative for consumers.
 type HeadingReading struct {
-	Timestamp       int64   `json:"timestamp"`
-	HeadingDeg      float64 `json:"heading_deg"`
-	HeadingRawDeg   float64 `json:"heading_raw_deg"`
-	HeadingFastDeg  float64 `json:"heading_fast_deg"`
-	HeadingSlowDeg  float64 `json:"heading_slow_deg"`
-	AccuracyDeg     float64 `json:"accuracy_deg"`
-	TiltCompensated bool    `json:"tilt_compensated"`
-	TiltDeg         float64 `json:"tilt_deg"`
-	MagStrengthUT   float64 `json:"mag_strength_ut"`
-	ExcessG         float64 `json:"excess_g"`
-	YawRateDPS      float64 `json:"yaw_rate_dps"`
+	Timestamp         int64   `json:"timestamp"`
+	HeadingDeg        float64 `json:"heading_deg"`
+	HeadingRawDeg     float64 `json:"heading_raw_deg"`
+	HeadingFastDeg    float64 `json:"heading_fast_deg"`
+	HeadingSlowDeg    float64 `json:"heading_slow_deg"`
+	AccuracyDeg       float64 `json:"accuracy_deg"`
+	HeadingValid      bool    `json:"heading_valid"`
+	InvalidReason     string  `json:"invalid_reason,omitempty"`
+	CalibrationState  string  `json:"calibration_state"`
+	TiltCompensated   bool    `json:"tilt_compensated"`
+	TiltDeg           float64 `json:"tilt_deg"`
+	MagStrengthUT     float64 `json:"mag_strength_ut"`
+	HorizontalFieldUT float64 `json:"horizontal_field_ut"`
+	FieldResidual     float64 `json:"field_residual"`
+	HeadingDispersion float64 `json:"heading_dispersion_deg"`
+	ExcessG           float64 `json:"excess_g"`
+	YawRateDPS        float64 `json:"yaw_rate_dps"`
+	DataReady         bool    `json:"data_ready"`
 }

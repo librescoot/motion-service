@@ -8,17 +8,21 @@ import (
 	"time"
 
 	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/calibration"
 	"github.com/librescoot/motion-service/internal/redis"
 )
 
 const (
 	tiltCompMaxExcessG = 0.05
+	// Planar calibration cannot correct vehicle-frame Z hard iron reliably.
+	maxPlanarHeadingTiltDeg = 10.0
 
 	headingEMAAlphaFast = 0.50
 	headingEMAAlphaMed  = 0.15
 	headingEMAAlphaSlow = 0.05
 
-	baseAccuracyDeg = 2.5
+	// The 2.5° data-sheet figure assumes a calibrated system.
+	baseAccuracyDeg = 15.0
 )
 
 type MagPoller struct {
@@ -27,6 +31,7 @@ type MagPoller struct {
 	gyro      *bmx.Gyroscope
 	publisher *redis.Publisher
 	cache     *bmx.SensorCache
+	collector *calibration.Collector
 	log       *slog.Logger
 
 	rateHz     atomic.Int32
@@ -36,6 +41,8 @@ type MagPoller struct {
 	emaMedSin, emaMedCos   float64
 	emaSlowSin, emaSlowCos float64
 	emaInit                bool
+	quality                headingQuality
+	calibrationRevision    uint64
 
 	pollCount int
 }
@@ -46,6 +53,7 @@ func NewMagPoller(
 	gyro *bmx.Gyroscope,
 	publisher *redis.Publisher,
 	cache *bmx.SensorCache,
+	collector *calibration.Collector,
 	rateHz int,
 	log *slog.Logger,
 ) *MagPoller {
@@ -55,6 +63,7 @@ func NewMagPoller(
 		gyro:       gyro,
 		publisher:  publisher,
 		cache:      cache,
+		collector:  collector,
 		log:        log,
 		rateChange: make(chan struct{}, 1),
 	}
@@ -115,7 +124,7 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		return nil
 	}
 
-	rawX, rawY, rawZ, magX, magY, magZ, magMag, _, err := p.mag.ReadAll()
+	rawX, rawY, rawZ, magX, magY, magZ, magMag, dataReady, err := p.mag.ReadAll()
 	if err != nil {
 		return err
 	}
@@ -172,8 +181,7 @@ func (p *MagPoller) poll(ctx context.Context) error {
 	if hasAccel {
 		excessG = math.Abs(aMag - 1.0)
 		if excessG <= tiltCompMaxExcessG {
-			rollRad = math.Atan2(ay, az)
-			pitchRad = math.Atan2(-ax, math.Sqrt(ay*ay+az*az))
+			rollRad, pitchRad = tiltFromSpecificForce(ax, ay, az)
 			tiltCompensated = true
 		}
 
@@ -181,10 +189,38 @@ func (p *MagPoller) poll(ctx context.Context) error {
 		tiltDeg = math.Atan2(horiz, -az) * 180.0 / math.Pi
 	}
 
+	horizontalX, horizontalY := p.mag.LeveledHorizontal(
+		magX, magY, magZ, rollRad, pitchRad)
+	horizontalField := math.Hypot(horizontalX, horizontalY)
 	rawHeading := p.mag.HeadingFromVector(magX, magY, magZ, rollRad, pitchRad)
+	if revision := p.mag.CalibrationRevision(); revision != p.calibrationRevision {
+		p.calibrationRevision = revision
+		p.quality = headingQuality{}
+		p.emaInit = false
+	}
 	headingFast, headingMed, headingSlow := p.smoothHeadings(rawHeading)
 
+	if p.collector != nil {
+		p.collector.Add(calibration.Sample{
+			Timestamp: time.Now().UnixMilli(),
+			CompX:     float64(rawX), CompY: float64(rawY), CompZ: float64(rawZ),
+			AccelX: ax, AccelY: ay, AccelZ: az,
+			FieldUT: magMag, ExcessG: excessG, TiltDeg: tiltDeg,
+		})
+	}
+
+	quality := p.quality.evaluate(rawHeading, magMag, horizontalField,
+		excessG, yawRateDPS, tiltCompensated)
+	calibrationState := p.mag.Calibration().State
+	quality = applyCalibrationPolicy(quality, calibrationState, tiltDeg)
 	accuracy := estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS, tiltCompensated)
+	if quality.Valid {
+		accuracy += quality.FieldResidual*30.0 + quality.DispersionDeg*0.25
+	} else {
+		// Existing consumers only understand accuracy. Keep them from trusting
+		// a heading rejected by the richer validity policy.
+		accuracy = 180.0
+	}
 
 	p.pollCount++
 	if p.pollCount >= 25 {
@@ -196,24 +232,53 @@ func (p *MagPoller) poll(ctx context.Context) error {
 			"tilt_comp", tiltCompensated,
 			"excess_g", excessG,
 			"yaw_rate_dps", yawRateDPS,
-			"accuracy_deg", accuracy)
+			"accuracy_deg", accuracy,
+			"heading_valid", quality.Valid,
+			"invalid_reason", quality.Reason,
+			"field_residual", quality.FieldResidual,
+			"horizontal_field_ut", horizontalField)
 		p.pollCount = 0
 	}
 
 	reading := &redis.HeadingReading{
-		Timestamp:       time.Now().UnixMilli(),
-		HeadingDeg:      headingMed,
-		HeadingRawDeg:   rawHeading,
-		HeadingFastDeg:  headingFast,
-		HeadingSlowDeg:  headingSlow,
-		AccuracyDeg:     accuracy,
-		TiltCompensated: tiltCompensated,
-		TiltDeg:         tiltDeg,
-		MagStrengthUT:   magMag,
-		ExcessG:         excessG,
-		YawRateDPS:      yawRateDPS,
+		Timestamp:         time.Now().UnixMilli(),
+		HeadingDeg:        headingMed,
+		HeadingRawDeg:     rawHeading,
+		HeadingFastDeg:    headingFast,
+		HeadingSlowDeg:    headingSlow,
+		AccuracyDeg:       accuracy,
+		HeadingValid:      quality.Valid,
+		InvalidReason:     quality.Reason,
+		CalibrationState:  calibrationState,
+		TiltCompensated:   tiltCompensated,
+		TiltDeg:           tiltDeg,
+		MagStrengthUT:     magMag,
+		HorizontalFieldUT: horizontalField,
+		FieldResidual:     quality.FieldResidual,
+		HeadingDispersion: quality.DispersionDeg,
+		ExcessG:           excessG,
+		YawRateDPS:        yawRateDPS,
+		DataReady:         dataReady,
 	}
 	return p.publisher.PublishHeading(ctx, reading)
+}
+
+// Acceleration is specific force: level in vehicle NED is (0, 0, -1g).
+func tiltFromSpecificForce(ax, ay, az float64) (rollRad, pitchRad float64) {
+	return math.Atan2(-ay, -az),
+		math.Atan2(ax, math.Sqrt(ay*ay+az*az))
+}
+
+func applyCalibrationPolicy(quality headingQualityResult, state string, tiltDeg float64) headingQualityResult {
+	if quality.Valid && tiltDeg > maxPlanarHeadingTiltDeg {
+		quality.Valid = false
+		quality.Reason = "excessive_tilt"
+	}
+	if state != "calibrated" {
+		quality.Valid = false
+		quality.Reason = "uncalibrated"
+	}
+	return quality
 }
 
 func estimateAccuracyDeg(tiltDeg, excessG, yawRateDPS float64, tiltCompensated bool) float64 {

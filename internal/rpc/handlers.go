@@ -9,6 +9,7 @@ import (
 	ipc "github.com/librescoot/redis-ipc"
 
 	"github.com/librescoot/motion-service/internal/bmx"
+	"github.com/librescoot/motion-service/internal/calibration"
 	"github.com/librescoot/motion-service/internal/profile"
 )
 
@@ -22,6 +23,11 @@ const (
 	MethodSoftReset          = "soft-reset"
 	MethodSetPolling         = "set-polling"
 	MethodSetStreaming       = "set-streaming"
+	MethodCalibrationStart   = "calibration-start"
+	MethodCalibrationStatus  = "calibration-status"
+	MethodCalibrationFinish  = "calibration-finish"
+	MethodCalibrationCancel  = "calibration-cancel"
+	MethodCalibrationReset   = "calibration-reset"
 )
 
 // PrepareHibernationReq explicitly names the requested profile for protocol evolution.
@@ -37,13 +43,19 @@ type PrepareHibernationResp struct {
 type GetCalibrationReq struct{}
 
 type CalibrationResp struct {
-	HardIronOffset [3]int16   `json:"hard_iron_offset"`
-	AxisOrder      [3]int     `json:"axis_order"`
-	AxisSign       [3]float64 `json:"axis_sign"`
-	YawOffsetDeg   float64    `json:"yaw_offset_deg"`
+	HardIronOffset [3]float64    `json:"hard_iron_offset"`
+	SoftIronXY     [2][2]float64 `json:"soft_iron_xy"`
+	AxisOrder      [3]int        `json:"axis_order"`
+	AxisSign       [3]float64    `json:"axis_sign"`
+	YawOffsetDeg   float64       `json:"yaw_offset_deg"`
+	State          string        `json:"state"`
 }
 
 type EmptyReq struct{}
+type CalibrationStatusResp struct {
+	calibration.Status
+}
+
 type EmptyResp struct {
 	OK bool `json:"ok"`
 }
@@ -67,13 +79,15 @@ type Streamer interface {
 }
 
 type Server struct {
-	controller *profile.Controller
-	accel      *bmx.Accelerometer
-	gyro       *bmx.Gyroscope
-	rate       RateSetter
-	stream     Streamer
-	publisher  StatusWriter
-	log        *slog.Logger
+	controller  *profile.Controller
+	accel       *bmx.Accelerometer
+	gyro        *bmx.Gyroscope
+	mag         *bmx.Magnetometer
+	rate        RateSetter
+	stream      Streamer
+	calibration *calibration.Collector
+	publisher   StatusWriter
+	log         *slog.Logger
 
 	srv *ipc.CallServer
 }
@@ -82,15 +96,17 @@ type StatusWriter interface {
 	UpdateStatusField(ctx context.Context, field, value string) error
 }
 
-func New(ipcClient *ipc.Client, controller *profile.Controller, accel *bmx.Accelerometer, gyro *bmx.Gyroscope, rate RateSetter, stream Streamer, publisher StatusWriter, log *slog.Logger) *Server {
+func New(ipcClient *ipc.Client, controller *profile.Controller, accel *bmx.Accelerometer, gyro *bmx.Gyroscope, mag *bmx.Magnetometer, rate RateSetter, stream Streamer, collector *calibration.Collector, publisher StatusWriter, log *slog.Logger) *Server {
 	s := &Server{
-		controller: controller,
-		accel:      accel,
-		gyro:       gyro,
-		rate:       rate,
-		stream:     stream,
-		publisher:  publisher,
-		log:        log,
+		controller:  controller,
+		accel:       accel,
+		gyro:        gyro,
+		mag:         mag,
+		rate:        rate,
+		stream:      stream,
+		calibration: collector,
+		publisher:   publisher,
+		log:         log,
 	}
 	s.srv = ipc.NewCallServer(ipcClient, Channel)
 	ipc.RegisterCall[PrepareHibernationReq, PrepareHibernationResp](s.srv, MethodPrepareHibernation, s.prepareHibernation)
@@ -99,6 +115,11 @@ func New(ipcClient *ipc.Client, controller *profile.Controller, accel *bmx.Accel
 	ipc.RegisterCall[EmptyReq, EmptyResp](s.srv, MethodSoftReset, s.softReset)
 	ipc.RegisterCall[SetPollingReq, EmptyResp](s.srv, MethodSetPolling, s.setPolling)
 	ipc.RegisterCall[SetStreamingReq, EmptyResp](s.srv, MethodSetStreaming, s.setStreaming)
+	ipc.RegisterCall[EmptyReq, CalibrationStatusResp](s.srv, MethodCalibrationStart, s.calibrationStart)
+	ipc.RegisterCall[EmptyReq, CalibrationStatusResp](s.srv, MethodCalibrationStatus, s.calibrationStatus)
+	ipc.RegisterCall[EmptyReq, CalibrationStatusResp](s.srv, MethodCalibrationFinish, s.calibrationFinish)
+	ipc.RegisterCall[EmptyReq, CalibrationStatusResp](s.srv, MethodCalibrationCancel, s.calibrationCancel)
+	ipc.RegisterCall[EmptyReq, CalibrationStatusResp](s.srv, MethodCalibrationReset, s.calibrationReset)
 	return s
 }
 
@@ -129,12 +150,17 @@ func (s *Server) prepareHibernation(req PrepareHibernationReq) (PrepareHibernati
 }
 
 func (s *Server) getCalibration(_ GetCalibrationReq) (CalibrationResp, error) {
-	cal := bmx.DefaultCalibration
+	if s.mag == nil {
+		return CalibrationResp{}, fmt.Errorf("magnetometer unavailable")
+	}
+	cal := s.mag.Calibration()
 	return CalibrationResp{
 		HardIronOffset: cal.HardIronOffset,
+		SoftIronXY:     cal.SoftIronXY,
 		AxisOrder:      cal.Orientation.AxisOrder,
 		AxisSign:       cal.Orientation.AxisSign,
 		YawOffsetDeg:   cal.YawOffsetDeg,
+		State:          cal.State,
 	}, nil
 }
 
@@ -175,6 +201,43 @@ func (s *Server) setPolling(req SetPollingReq) (EmptyResp, error) {
 	_ = s.publisher.UpdateStatusField(context.Background(), "polling-rate-hz", fmt.Sprintf("%d", req.RateHz))
 	s.log.Info("polling rate overridden via rpc", "rate_hz", req.RateHz)
 	return EmptyResp{OK: true}, nil
+}
+
+func (s *Server) calibrationStart(_ EmptyReq) (CalibrationStatusResp, error) {
+	if s.calibration == nil {
+		return CalibrationStatusResp{}, fmt.Errorf("magnetometer calibration unavailable")
+	}
+	return CalibrationStatusResp{Status: s.calibration.Start()}, nil
+}
+
+func (s *Server) calibrationStatus(_ EmptyReq) (CalibrationStatusResp, error) {
+	if s.calibration == nil {
+		return CalibrationStatusResp{}, fmt.Errorf("magnetometer calibration unavailable")
+	}
+	return CalibrationStatusResp{Status: s.calibration.Status()}, nil
+}
+
+func (s *Server) calibrationFinish(_ EmptyReq) (CalibrationStatusResp, error) {
+	if s.calibration == nil {
+		return CalibrationStatusResp{}, fmt.Errorf("magnetometer calibration unavailable")
+	}
+	status, err := s.calibration.Finish()
+	return CalibrationStatusResp{Status: status}, err
+}
+
+func (s *Server) calibrationCancel(_ EmptyReq) (CalibrationStatusResp, error) {
+	if s.calibration == nil {
+		return CalibrationStatusResp{}, fmt.Errorf("magnetometer calibration unavailable")
+	}
+	return CalibrationStatusResp{Status: s.calibration.Cancel()}, nil
+}
+
+func (s *Server) calibrationReset(_ EmptyReq) (CalibrationStatusResp, error) {
+	if s.calibration == nil {
+		return CalibrationStatusResp{}, fmt.Errorf("magnetometer calibration unavailable")
+	}
+	status, err := s.calibration.Reset()
+	return CalibrationStatusResp{Status: status}, err
 }
 
 // setStreaming controls sensor telemetry only; interrupt wake handling remains live.

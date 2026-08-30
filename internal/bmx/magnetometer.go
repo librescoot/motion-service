@@ -3,6 +3,7 @@ package bmx
 import (
 	"fmt"
 	"math"
+	"sync"
 	"time"
 )
 
@@ -21,26 +22,41 @@ type TrimData struct {
 }
 
 type Calibration struct {
-	HardIronOffset [3]int16
+	HardIronOffset [3]float64
+	SoftIronXY     [2][2]float64
 	Orientation    Orientation
 	YawOffsetDeg   float64
+	State          string
 }
 
-// Device-specific mounting calibration.
+// DefaultCalibration is only the mechanical sensor-to-vehicle axis mapping.
+// Magnetic correction is device-specific and loaded from /data.
 var DefaultCalibration = Calibration{
-	HardIronOffset: [3]int16{13, 339, 989},
+	SoftIronXY: [2][2]float64{{1, 0}, {0, 1}},
 	Orientation: Orientation{
 
 		AxisOrder: [3]int{1, 0, 2},
 		AxisSign:  [3]float64{-1, 1, 1},
 	},
-	YawOffsetDeg: 107,
+	State: "uncalibrated",
 }
 
 type Magnetometer struct {
 	*i2cDevice
-	trimData    TrimData
-	calibration Calibration
+	trimData            TrimData
+	calibrationMu       sync.RWMutex
+	calibration         Calibration
+	calibrationRevision uint64
+}
+
+// MagSample keeps the raw ADC values and the factory-trim-compensated values
+// from one register burst together. Calibration fitting must use Comp*, since
+// those are the units consumed by the runtime calibration pipeline.
+type MagSample struct {
+	RawX, RawY, RawZ    int16
+	RHall               uint16
+	DataReady           bool
+	CompX, CompY, CompZ int16
 }
 
 func NewMagnetometer(bus string) (*Magnetometer, error) {
@@ -281,23 +297,45 @@ func (m *Magnetometer) ReadRaw() (x, y, z int16, rhall uint16, drdy bool, err er
 	return int16(xRaw), int16(yRaw), int16(zRaw), rhall, drdy, nil
 }
 
+func (m *Magnetometer) ReadSample() (MagSample, error) {
+	rawX, rawY, rawZ, rhall, dataReady, err := m.ReadRaw()
+	if err != nil {
+		return MagSample{}, err
+	}
+	return MagSample{
+		RawX: rawX, RawY: rawY, RawZ: rawZ,
+		RHall: rhall, DataReady: dataReady,
+		CompX: m.compensateX(rawX, rhall),
+		CompY: m.compensateY(rawY, rhall),
+		CompZ: m.compensateZ(rawZ, rhall),
+	}, nil
+}
+
 func (m *Magnetometer) ReadData() (x, y, z int16, err error) {
-	rawX, rawY, rawZ, rhall, _, err := m.ReadRaw()
+	sample, err := m.ReadSample()
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	return m.compensateX(rawX, rhall),
-		m.compensateY(rawY, rhall),
-		m.compensateZ(rawZ, rhall),
-		nil
+	return sample.CompX, sample.CompY, sample.CompZ, nil
 }
 
 func (m *Magnetometer) SetCalibration(cal Calibration) {
+	m.calibrationMu.Lock()
+	defer m.calibrationMu.Unlock()
 	m.calibration = cal
+	m.calibrationRevision++
 }
 
 func (m *Magnetometer) Calibration() Calibration {
+	m.calibrationMu.RLock()
+	defer m.calibrationMu.RUnlock()
 	return m.calibration
+}
+
+func (m *Magnetometer) CalibrationRevision() uint64 {
+	m.calibrationMu.RLock()
+	defer m.calibrationMu.RUnlock()
+	return m.calibrationRevision
 }
 
 // Compensated BMM150 LSB values are 1/16 µT.
@@ -311,20 +349,24 @@ func (m *Magnetometer) ReadDataInMicroTesla() (vx, vy, vz, magnitude float64, er
 // ReadAll supplies both chip-frame compensated values and calibrated vehicle-frame
 // µT from one I²C transfer; DRDY is false when polling faster than ODR.
 func (m *Magnetometer) ReadAll() (compX, compY, compZ int16, vx, vy, vz, magnitude float64, drdy bool, err error) {
-	rawX, rawY, rawZ, rhall, d, e := m.ReadRaw()
+	sample, e := m.ReadSample()
 	if e != nil {
 		err = e
 		return
 	}
-	compX = m.compensateX(rawX, rhall)
-	compY = m.compensateY(rawY, rhall)
-	compZ = m.compensateZ(rawZ, rhall)
-	drdy = d
+	compX, compY, compZ = sample.CompX, sample.CompY, sample.CompZ
+	drdy = sample.DataReady
 
-	cal := m.calibration
-	sx := float64(compX - cal.HardIronOffset[0])
-	sy := float64(compY - cal.HardIronOffset[1])
-	sz := float64(compZ - cal.HardIronOffset[2])
+	cal := m.Calibration()
+	sx := float64(compX) - cal.HardIronOffset[0]
+	sy := float64(compY) - cal.HardIronOffset[1]
+	sz := float64(compZ) - cal.HardIronOffset[2]
+	matrix := cal.SoftIronXY
+	if matrix == ([2][2]float64{}) {
+		matrix = [2][2]float64{{1, 0}, {0, 1}}
+	}
+	sx, sy = matrix[0][0]*sx+matrix[0][1]*sy,
+		matrix[1][0]*sx+matrix[1][1]*sy
 	vx, vy, vz = cal.Orientation.Apply(sx, sy, sz)
 	vx /= magScaleUT
 	vy /= magScaleUT
@@ -334,24 +376,25 @@ func (m *Magnetometer) ReadAll() (compX, compY, compZ int16, vx, vy, vz, magnitu
 }
 
 func (m *Magnetometer) Orientation() Orientation {
-	return m.calibration.Orientation
+	return m.Calibration().Orientation
+}
+
+func (m *Magnetometer) LeveledHorizontal(magX, magY, magZ, rollRad, pitchRad float64) (bx, by float64) {
+	if math.IsNaN(rollRad) || math.IsNaN(pitchRad) {
+		return magX, magY
+	}
+	// NED frame: X forward, Y right, Z down.
+	sr, cr := math.Sincos(rollRad)
+	sp, cp := math.Sincos(pitchRad)
+	return magX*cp + magY*sp*sr + magZ*sp*cr,
+		magY*cr - magZ*sr
 }
 
 func (m *Magnetometer) HeadingFromVector(magX, magY, magZ, rollRad, pitchRad float64) float64 {
-	var bx, by float64
-	if math.IsNaN(rollRad) || math.IsNaN(pitchRad) {
-		bx = magX
-		by = magY
-	} else {
-
-		sr, cr := math.Sincos(rollRad)
-		sp, cp := math.Sincos(pitchRad)
-		bx = magX*cp + magY*sp*sr + magZ*sp*cr
-		by = magY*cr - magZ*sr
-	}
+	bx, by := m.LeveledHorizontal(magX, magY, magZ, rollRad, pitchRad)
 
 	angleDeg := math.Atan2(-by, bx) * 180.0 / math.Pi
-	angleDeg += m.calibration.YawOffsetDeg
+	angleDeg += m.Calibration().YawOffsetDeg
 	angleDeg = math.Mod(angleDeg+360.0, 360.0)
 	return angleDeg
 }

@@ -120,11 +120,15 @@ func (p *Publisher) PublishHeading(ctx context.Context, reading *HeadingReading)
 	}
 
 	hash := map[string]any{
-		"heading":           fmt.Sprintf("%d", int(math.Mod(reading.HeadingDeg+360.0, 360.0))),
-		"heading-deg":       fmt.Sprintf("%.2f", reading.HeadingDeg),
-		"heading-accuracy":  fmt.Sprintf("%.2f", reading.AccuracyDeg),
-		"heading-tilt":      fmt.Sprintf("%.2f", reading.TiltDeg),
-		"heading-tilt-comp": map[bool]string{true: "true", false: "false"}[reading.TiltCompensated],
+		"heading":                fmt.Sprintf("%d", int(math.Mod(reading.HeadingDeg+360.0, 360.0))),
+		"heading-deg":            fmt.Sprintf("%.2f", reading.HeadingDeg),
+		"heading-accuracy":       fmt.Sprintf("%.2f", reading.AccuracyDeg),
+		"heading-valid":          fmt.Sprintf("%t", reading.HeadingValid),
+		"heading-invalid-reason": reading.InvalidReason,
+		"calibration-state":      reading.CalibrationState,
+		"heading-field-residual": fmt.Sprintf("%.4f", reading.FieldResidual),
+		"heading-tilt":           fmt.Sprintf("%.2f", reading.TiltDeg),
+		"heading-tilt-comp":      map[bool]string{true: "true", false: "false"}[reading.TiltCompensated],
 	}
 	if err := p.hash.SetMany(hash, ipc.NoPublish(), ipc.Sync()); err != nil {
 		return fmt.Errorf("failed to update heading hash: %w", err)

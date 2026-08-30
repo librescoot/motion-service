@@ -77,7 +77,7 @@ func main() {
 	}
 
 	mag.SetCalibration(bmx.Calibration{
-		HardIronOffset: [3]int16{0, 0, 0},
+		SoftIronXY: [2][2]float64{{1, 0}, {0, 1}},
 		Orientation: bmx.Orientation{
 			AxisOrder: [3]int{0, 1, 2},
 			AxisSign:  [3]float64{1, 1, 1},
@@ -136,14 +136,9 @@ loop:
 			st.print(logger, samples, time.Since(start))
 
 		case t := <-tick.C:
-			rawX, rawY, rawZ, rhall, drdy, err := mag.ReadRaw()
+			magSample, err := mag.ReadSample()
 			if err != nil {
 				logger.Warn("mag read failed", "error", err)
-				continue
-			}
-			compX, compY, compZ, err := mag.ReadData()
-			if err != nil {
-				logger.Warn("mag compensated read failed", "error", err)
 				continue
 			}
 			ax, ay, az, _, err := accel.ReadDataInG()
@@ -157,17 +152,18 @@ loop:
 				continue
 			}
 
-			st.add(rawX, rawY, rawZ)
+			st.add(magSample.CompX, magSample.CompY, magSample.CompZ)
 			samples++
 
 			drdyInt := 0
-			if drdy {
+			if magSample.DataReady {
 				drdyInt = 1
 			}
 			if _, werr := fmt.Fprintf(w,
 				"%d,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f\n",
-				t.UnixMilli(), rawX, rawY, rawZ, rhall, drdyInt,
-				compX, compY, compZ,
+				t.UnixMilli(), magSample.RawX, magSample.RawY, magSample.RawZ,
+				magSample.RHall, drdyInt,
+				magSample.CompX, magSample.CompY, magSample.CompZ,
 				ax, ay, az, gx, gy, gz); werr != nil {
 				logger.Error("CSV write failed; aborting", "error", werr)
 				cancel()
@@ -299,8 +295,8 @@ func (s *stats) summary(n int, dt time.Duration) string {
 		Samples:        n,
 		DurationS:      dt.Seconds(),
 		CapturedAt:     time.Now().UTC().Format(time.RFC3339),
-		Note: "axis_sign and yaw_offset_deg are placeholders — set them by " +
-			"the spin-direction and known-North checks described in README.md.",
+		Note: "hard_iron_offset is computed in factory-trim-compensated sensor units; " +
+			"axis_sign and yaw_offset_deg are placeholders.",
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	return string(b)
