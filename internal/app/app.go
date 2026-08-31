@@ -175,16 +175,23 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("apply initial idle profile: %w", err)
 	}
 
-	// If we woke from a hibernation motion, emit the sentinel event so
-	// alarm-service can branch its FSM on it. Doing this AFTER the chip
-	// has been put into Idle state so consumers see a chip in a known
-	// configuration when they react.
+	// If we woke from a hibernation motion, emit the sentinel both as a
+	// pub/sub event (for live consumers) and as a hash field with the
+	// timestamp (durable, so a consumer that starts up after motion-service
+	// finishes still sees it). alarm-service reads + deletes the hash
+	// field on its own startup; the timestamp is checked for staleness.
+	// Doing this AFTER the chip has been put into Idle state so consumers
+	// see a chip in a known configuration when they react.
 	if wakeFromHibernation {
+		ts := time.Now().UnixMilli()
 		if err := a.publisher.PublishMotionEvent(ctx, &redis.MotionEvent{
 			Type:      "wake-hibernation",
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: ts,
 		}); err != nil {
 			a.log.Warn("publish wake-hibernation failed", "error", err)
+		}
+		if err := a.publisher.UpdateStatusField(ctx, "wake-cause", strconv.FormatInt(ts, 10)); err != nil {
+			a.log.Warn("write wake-cause field failed", "error", err)
 		}
 	}
 
