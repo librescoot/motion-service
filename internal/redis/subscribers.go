@@ -21,11 +21,26 @@ type RateSetter interface {
 }
 
 // Only parked and driving states need the live sensor stream; alarm wake uses
-// chip interrupts, so all other states use the low-rate heartbeat.
+// chip interrupts. Stand-by and hibernation have the dashboard powered off, so
+// nothing reads the stream and the pollers are suspended: at one poll per
+// second the three BMX055 sensors cost about 50 I2C interrupts per second.
+// Every other state keeps the low-rate heartbeat.
 const (
 	FastPollRateHz = 5
 	SlowPollRateHz = 1
+	IdlePollRateHz = 0
 )
+
+// SensorRateForVehicleState maps a vehicle[state] value to a polling rate.
+func SensorRateForVehicleState(state string) int {
+	switch state {
+	case "parked", "ready-to-drive":
+		return FastPollRateHz
+	case "stand-by", "hibernating", "hibernating-imminent", "hibernating-waiting":
+		return IdlePollRateHz
+	}
+	return SlowPollRateHz
+}
 
 type Subscriber struct {
 	ipcClient  *ipc.Client
@@ -135,11 +150,7 @@ func (s *Subscriber) handlePmState(value string) error {
 }
 
 func (s *Subscriber) handleVehicleState(value string) error {
-	rate := SlowPollRateHz
-	switch value {
-	case "parked", "ready-to-drive":
-		rate = FastPollRateHz
-	}
+	rate := SensorRateForVehicleState(value)
 	s.log.Info("vehicle state changed", "state", value, "sensor_rate_hz", rate)
 	s.rate.SetRate(rate)
 	return nil

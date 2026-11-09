@@ -31,7 +31,7 @@ motion-service watches `alarm.status` and `power-manager.state` hashes. It owns 
 
 Before hibernation, alarm-service calls `prepare-hibernation` on `motion:rpc`. That call applies and confirms `armed-hibernation`; it is the synchronization point between the two services. On startup, a latched motion interrupt is published as a `wake-hibernation` event and stored as `motion.wake-cause` for a consumer that starts later.
 
-The service also watches `vehicle.state` to select the telemetry poll rate: 5 Hz for `parked` and `ready-to-drive`, and 1 Hz for other values. The process flag supplies the initial rate; the first vehicle state update can replace it.
+The service also watches `vehicle.state` to select the telemetry poll rate: 5 Hz for `parked` and `ready-to-drive`, polling suspended in `stand-by` and the `hibernating*` states (the dashboard is off and alarm wake uses chip interrupts, so nothing reads the stream), and 1 Hz for other values. The process flag supplies the initial rate; the first vehicle state update can replace it.
 
 ### Redis/Valkey contract
 
